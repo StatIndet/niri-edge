@@ -17,6 +17,7 @@ pub struct Animations {
     pub window_open: WindowOpenAnim,
     pub window_close: WindowCloseAnim,
     pub window_minimize: WindowMinimizeAnim,
+    pub window_minimize_effect: MinimizeEffect,
     pub horizontal_view_movement: HorizontalViewMovementAnim,
     pub window_movement: WindowMovementAnim,
     pub window_resize: WindowResizeAnim,
@@ -38,6 +39,7 @@ impl Default for Animations {
             window_open: Default::default(),
             window_close: Default::default(),
             window_minimize: Default::default(),
+            window_minimize_effect: Default::default(),
             window_resize: Default::default(),
             config_notification_open_close: Default::default(),
             exit_confirmation_open_close: Default::default(),
@@ -64,6 +66,8 @@ pub struct AnimationsPart {
     pub window_close: Option<WindowCloseAnim>,
     #[knuffel(child)]
     pub window_minimize: Option<WindowMinimizeAnim>,
+    #[knuffel(child, unwrap(argument))]
+    pub window_minimize_effect: Option<MinimizeEffect>,
     #[knuffel(child)]
     pub horizontal_view_movement: Option<HorizontalViewMovementAnim>,
     #[knuffel(child)]
@@ -99,6 +103,7 @@ impl MergeWith<AnimationsPart> for Animations {
             window_open,
             window_close,
             window_minimize,
+            window_minimize_effect,
             horizontal_view_movement,
             window_movement,
             window_resize,
@@ -913,6 +918,14 @@ where
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowMinimizeAnim(pub Animation);
 
+/// Visual effect only; kept separate so a shell's style fragment preserves timing and `off`.
+#[derive(knuffel::DecodeScalar, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum MinimizeEffect {
+    #[default]
+    Scale,
+    Genie,
+}
+
 impl Default for WindowMinimizeAnim {
     fn default() -> Self {
         Self(Animation {
@@ -937,5 +950,29 @@ where
         Ok(Self(Animation::decode_node(node, ctx, default, |_, _| {
             Ok(false)
         })?))
+    }
+}
+
+#[cfg(test)]
+mod minimize_tests {
+    use super::*;
+
+    #[test]
+    fn style_merge_preserves_timing_disable_and_other_animations() {
+        let mut animations = crate::Config::parse_mem(r#"
+            animations { off; window-minimize { duration-ms 650; curve "linear"; }; window-open { off; }; }
+        "#).unwrap().animations;
+        let before = animations.clone();
+        let part: AnimationsPart =
+            knuffel::parse("style.kdl", r#"window-minimize-effect "genie";"#).unwrap();
+        animations.merge_with(&part);
+        assert_eq!(animations.window_minimize_effect, MinimizeEffect::Genie);
+        assert_eq!(animations.window_minimize, before.window_minimize);
+        assert_eq!(animations.window_open, before.window_open);
+        assert!(animations.off);
+        assert!(
+            crate::Config::parse_mem(r#"animations { window-minimize-effect "unknown"; }"#)
+                .is_err()
+        );
     }
 }

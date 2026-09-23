@@ -16,6 +16,7 @@ pub struct Shaders {
     pub clipped_surface: Option<GlesTexProgram>,
     pub postprocess_and_clip: Option<GlesTexProgram>,
     pub resize: Option<ShaderProgram>,
+    pub genie: Option<ShaderProgram>,
     pub gradient_fade: Option<GlesTexProgram>,
     pub blur: Option<BlurProgram>,
     pub custom_resize: RefCell<Option<ShaderProgram>>,
@@ -30,6 +31,7 @@ pub enum ProgramType {
     Resize,
     Close,
     Open,
+    Genie,
 }
 
 impl Shaders {
@@ -132,6 +134,22 @@ impl Shaders {
             })
             .ok();
 
+        let genie = ShaderProgram::compile(
+            renderer,
+            include_str!("genie.frag"),
+            &[
+                UniformName::new("window_rect", UniformType::_4f),
+                UniformName::new("target_rect", UniformType::_4f),
+                UniformName::new("texture_rect", UniformType::_4f),
+                UniformName::new("area_origin", UniformType::_2f),
+                UniformName::new("edge", UniformType::_1f),
+                UniformName::new("morph", UniformType::_1f),
+            ],
+            &["niri_tex"],
+        )
+        .map_err(|err| warn!("error compiling Genie shader; using scale: {err:?}"))
+        .ok();
+
         let gradient_fade = renderer
             .compile_custom_texture_shader(
                 include_str!("gradient_fade.frag"),
@@ -154,6 +172,7 @@ impl Shaders {
             clipped_surface,
             postprocess_and_clip,
             resize,
+            genie,
             gradient_fade,
             blur,
             custom_resize: RefCell::new(None),
@@ -207,6 +226,7 @@ impl Shaders {
                 .or_else(|| self.resize.clone()),
             ProgramType::Close => self.custom_close.borrow().clone(),
             ProgramType::Open => self.custom_open.borrow().clone(),
+            ProgramType::Genie => self.genie.clone(),
         }
     }
 }

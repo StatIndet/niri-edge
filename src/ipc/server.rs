@@ -287,6 +287,7 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
         Request::Capabilities => Response::Capabilities(niri_ipc::Capabilities {
             window_minimization: true,
             window_minimization_animation: true,
+            window_minimization_effects: vec!["scale".into(), "genie".into()],
         }),
         Request::SetWindowAnimationTargets { targets } => {
             if targets.len() > 1024 {

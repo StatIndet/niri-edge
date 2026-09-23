@@ -7531,6 +7531,7 @@ niri_render_elements! {
         WindowMruUi = WindowMruUiRenderElement<R>,
         ExitConfirmDialog = ExitConfirmDialogRenderElement,
         Texture = PrimaryGpuTextureRenderElement,
+        Minimize = crate::layout::minimize_animation::MinimizeAnimationRenderElement,
         // Used for the CPU-rendered panels.
         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,
     }

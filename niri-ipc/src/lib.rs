@@ -186,6 +186,9 @@ pub struct Capabilities {
     /// Shared minimize/restore scale animation and connection-owned target hints.
     #[serde(default)]
     pub window_minimization_animation: bool,
+    /// Supported values for `animations { window-minimize-effect "..."; }`.
+    #[serde(default)]
+    pub window_minimization_effects: Vec<String>,
 }
 
 /// Dock edge in the output's logical coordinate system, after output transform.
@@ -2281,10 +2284,11 @@ mod tests {
         let response = Response::Capabilities(Capabilities {
             window_minimization: true,
             window_minimization_animation: true,
+            window_minimization_effects: vec!["scale".into(), "genie".into()],
         });
         assert_eq!(
             serde_json::to_value(response).unwrap(),
-            serde_json::json!({"Capabilities": {"window_minimization": true, "window_minimization_animation": true}})
+            serde_json::json!({"Capabilities": {"window_minimization": true, "window_minimization_animation": true, "window_minimization_effects": ["scale", "genie"]}})
         );
     }
 

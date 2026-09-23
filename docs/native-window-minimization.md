@@ -79,11 +79,11 @@ desktop shell is running.
 `niri msg --json capabilities` returns:
 
 ```json
-{"window_minimization":true,"window_minimization_animation":true}
+{"window_minimization":true,"window_minimization_animation":true,"window_minimization_effects":["scale","genie"]}
 ```
 
 The socket request is `"Capabilities"`; its successful reply is
-`{"Ok":{"Capabilities":{"window_minimization":true,"window_minimization_animation":true}}}`. This read-only query
+`{"Ok":{"Capabilities":{"window_minimization":true,"window_minimization_animation":true,"window_minimization_effects":["scale","genie"]}}}`. This read-only query
 does not change focus or window state. Older compositors may reject the query;
 clients should treat that as an unavailable extension. The existing `Version`
 reply is unchanged.
@@ -116,7 +116,7 @@ minimize, unminimize, activate, and close requests. Foreign-toplevel handles sta
 alive while minimized. Unminimizing alone does not request activation; explicit
 activation and the native restore action do.
 
-## Scale transitions and Dock targets
+## Scale and Genie transitions
 
 Minimization snapshots the visible tile before detaching it. The tiled layout
 closes the gap using its normal movement rules. Restoration inserts the real
@@ -132,6 +132,7 @@ default). Global animation disabling and slowdown apply too:
 
 ```kdl
 animations {
+    window-minimize-effect "genie" // "scale" is the default
     window-minimize {
         duration-ms 280
         curve "ease-out-cubic"
@@ -140,9 +141,22 @@ animations {
 }
 ```
 
-A shell checks `window_minimization_animation` separately from basic minimization.
-An absent field means unavailable. It maintains a dedicated IPC connection and
-publishes the complete set of targets it owns as newline-delimited requests:
+Scale keeps a rectangular snapshot; Genie pulls the near edge toward the icon,
+then follows with the far edge while narrowing and bending individual sections
+of the image. Left, right, top, and bottom share one direction-normalized shader;
+restoration traverses the same shape in reverse. Shadows, borders, and the
+snapshot's orientation travel with the sheet. A missing shader or an unusual
+hint behind the source window falls back to Scale. Changing the setting affects
+new operations; an active operation keeps its selected effect.
+
+A shell checks `window_minimization_animation` separately from basic minimization,
+and checks `window_minimization_effects` before offering effect selection. An
+absent boolean means unavailable; an absent effects list means the shell cannot
+edit the effect through this extension. Timing, slowdown and animation disabling
+are independent of `window-minimize-effect`. A style-only include preserves them.
+
+The shell maintains a dedicated IPC connection and publishes the complete set of
+targets it owns as newline-delimited requests:
 
 ```json
 {"SetWindowAnimationTargets":{"targets":[{"id":42,"output":"DP-1","rect":[24.5,8,48,48],"edge":"bottom","layer_namespace":"clavis-shell-dock"}]}}
@@ -180,21 +194,45 @@ window closure, output removal/reconfiguration, overview entry, or session lock.
 The real window remains usable if animation preparation fails or animation is
 disabled. No GPU snapshot cache is retained for the duration of minimization;
 Dock thumbnail caching remains the shell's responsibility. The shared lifecycle
-is separate from the rectangle interpolation, which is the only effect supplied
-in this stage.
+is shared by rectangle interpolation and Genie deformation.
+
+## Clavis Settings integration
+
+Clavis exposes **Genie / Scale** under **Settings → Dock → Behavior** when the
+compositor advertises both effects. First-time **Set up** connects a managed
+`clavis/minimize-animation.kdl` include through the existing configuration editor.
+The fragment contains only the selected style:
+
+```kdl
+animations {
+    window-minimize-effect "genie"
+}
+```
+
+The niri configuration is the sole persistent source; Clavis does not duplicate
+the preference in `dock.json` or rewrite window-open/window-close settings. Edits
+use staged validation, atomic publication and stale-revision checks. A conflicting
+later include produces an error instead of silently claiming success. Niri's
+normal configuration watcher applies a successful edit. Setup/editing happen
+only when requested in Settings; building this feature does not change the active
+desktop's configuration.
 
 ## Scope and validation
 
-The fork supports rectangle scale transitions for minimization and restoration.
-Genie deformation, minimized-window overview previews, old-workspace restoration,
-and persistence across compositor restarts are not implemented. Advertising protocol
+The fork supports Scale and Genie for minimization and restoration.
+Minimized-window overview previews, old-workspace restoration, and persistence of
+minimized windows across compositor restarts are not implemented. Advertising protocol
 support does not guarantee identical title-bar buttons in every application.
 
 Headless GLES tests use actual Wayland client buffers and full-output pixel
-readback to verify all four directions, snapshot/live handoff (including a stalled
-client), tiled insertion, floating restoration, fractional scale, rotated and
+readback to verify both effects in all four directions, snapshot/live handoff
+(including a stalled client), tiled insertion, floating restoration, fractional scale, rotated and
 multiple outputs, rapid actions, publisher/surface lifetime, cancellation, and
-capture privacy. Physical GPU and multi-monitor timing still require validation
+capture privacy. Asymmetric colored subsurfaces verify texture orientation; image
+cross-sections distinguish Genie deformation from rigid scaling. Set
+`NIRI_TEST_ANIMATION_FRAMES` to an existing directory when running
+`tests::minimize_animation` to export a deterministic frame sequence for inspection.
+Physical GPU and multi-monitor timing still require validation
 in a separately launched session.
 
 Contract tests cover CLI and KDL parsing, IPC wire formats, compatibility with

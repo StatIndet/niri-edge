@@ -1586,6 +1586,7 @@ mod tests {
                         ),
                     },
                 ),
+                window_minimize_effect: Scale,
                 horizontal_view_movement: HorizontalViewMovementAnim(
                     Animation {
                         off: false,

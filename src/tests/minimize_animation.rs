@@ -23,10 +23,14 @@ use crate::utils::output_size;
 use crate::window::mapped::MappedId;
 
 fn setup(extra: &str) -> Fixture {
+    setup_with_effect(extra, "scale")
+}
+
+fn setup_with_effect(extra: &str, effect: &str) -> Fixture {
     let config = Config::parse_mem(&format!(r#"
         layout {{ gaps 0; border {{ off; }}; focus-ring {{ off; }}; shadow {{ off; }}; }}
         hotkey-overlay {{ skip-at-startup; }}
-        animations {{ window-open {{ off; }}; window-minimize {{ duration-ms 1000; curve "linear"; }}; }}
+        animations {{ window-open {{ off; }}; window-minimize {{ duration-ms 1000; curve "linear"; }}; window-minimize-effect "{effect}"; }}
         {extra}
     "#)).unwrap();
     let mut f = Fixture::with_config(config);
@@ -66,7 +70,7 @@ fn elements(f: &mut Fixture, output: &Output) -> Vec<Rectangle<f64, Logical>> {
     result
 }
 
-fn red_pixels(f: &mut Fixture, output: &Output, target: RenderTarget) -> usize {
+fn pixels(f: &mut Fixture, output: &Output, target: RenderTarget) -> Vec<u8> {
     let state = f.niri_state();
     state.niri.update_render_elements(Some(output));
     state
@@ -82,7 +86,7 @@ fn red_pixels(f: &mut Fixture, output: &Output, target: RenderTarget) -> usize {
                 false,
             );
             let scale = Scale::from(output.current_scale().fractional_scale());
-            let pixels = render_to_vec(
+            render_to_vec(
                 renderer,
                 output_size(output).to_physical_precise_round(scale),
                 scale,
@@ -90,13 +94,73 @@ fn red_pixels(f: &mut Fixture, output: &Output, target: RenderTarget) -> usize {
                 Fourcc::Abgr8888,
                 elements.into_iter().rev(),
             )
-            .unwrap();
-            pixels
-                .chunks_exact(4)
-                .filter(|p| p[0] > 180 && p[1] < 80 && p[2] < 80)
-                .count()
+            .unwrap()
         })
         .unwrap()
+}
+
+fn red_pixels(f: &mut Fixture, output: &Output, target: RenderTarget) -> usize {
+    pixels(f, output, target)
+        .chunks_exact(4)
+        .filter(|p| is_red(p))
+        .count()
+}
+
+fn is_red(p: &[u8]) -> bool {
+    p[0] > 180 && p[1] < 80 && p[2] < 80
+}
+
+fn stamp(f: &mut Fixture, client: ClientId, parent: &WlSurface, x: i32, y: i32, color: [u32; 3]) {
+    let c = f.client(client);
+    let surface = c
+        .state
+        .compositor
+        .as_ref()
+        .unwrap()
+        .create_surface(&c.qh, ());
+    let sub = c
+        .state
+        .subcompositor
+        .as_ref()
+        .unwrap()
+        .get_subsurface(&surface, parent, &c.qh, ());
+    sub.set_position(x, y);
+    let viewport = c
+        .state
+        .viewporter
+        .as_ref()
+        .unwrap()
+        .get_viewport(&surface, &c.qh, ());
+    viewport.set_destination(20, 20);
+    let buffer = c.state.spbm.as_ref().unwrap().create_u32_rgba_buffer(
+        color[0],
+        color[1],
+        color[2],
+        u32::MAX,
+        &c.qh,
+        (),
+    );
+    surface.attach(Some(&buffer), 0, 0);
+    surface.commit();
+    c.window(parent).commit();
+    f.double_roundtrip(client);
+}
+
+// Optional full-compositor frames for visual inspection, never from the running desktop.
+fn save_frame(name: &str, pixels: &[u8]) {
+    if let Some(directory) = std::env::var_os("NIRI_TEST_ANIMATION_FRAMES") {
+        let file =
+            std::fs::File::create(std::path::Path::new(&directory).join(format!("{name}.png")))
+                .unwrap();
+        let mut encoder = png::Encoder::new(file, 800, 600);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(pixels)
+            .unwrap();
+    }
 }
 
 #[test]
@@ -189,71 +253,85 @@ fn egl_scale_endpoints_all_edges_and_live_handoff() {
 
 #[test]
 fn egl_cross_output_fractional_scale_restore_uses_new_layout() {
-    let mut f = setup(r#"output "headless-2" { scale 1.5; transform "90"; }"#);
-    let client = f.add_client();
-    let (_, first) = window(&mut f, client, [u32::MAX, 0, 0]);
-    let (_, second) = window(&mut f, client, [0, 0, u32::MAX]);
-    f.niri_complete_animations();
-    set_time(f.niri(), Duration::ZERO);
-    let a = f.niri_output(1);
-    let b = f.niri_output(2);
-    let win = f.niri().find_window_by_id(first).unwrap();
-    let owner = Rc::new(());
-    let target = Rectangle::new((8., 120.).into(), (40., 40.).into());
-    f.niri().layout.set_window_animation_targets(
-        &owner,
-        vec![AnimationTarget {
-            id: win.clone(),
-            output: b.clone(),
-            rect: target,
-            edge: DockEdge::Left,
-            layer: None,
-        }],
-    );
-    assert!(f.niri_state().minimize_window(Some(first)));
-    assert_eq!(f.niri().layout.windows().count(), 1);
-    assert!(f.niri().find_window_by_id(second).is_some());
-    assert!(f.niri_state().restore_window(Some(first), Some(&b), true));
-    assert!(elements(&mut f, &a).is_empty());
-    assert_eq!(elements(&mut f, &b), vec![target]);
-    assert!(f.niri_state().minimize_window(Some(first)));
-    assert!(f.niri_state().restore_window(Some(first), Some(&b), true));
-    assert_eq!(elements(&mut f, &b).len(), 1);
-    f.niri_complete_animations();
-    assert!(elements(&mut f, &b).is_empty());
-    assert!(red_pixels(&mut f, &b, RenderTarget::Output) > 10000);
-    let (_, output) = f
-        .niri()
-        .layout
-        .find_window_and_output(win.toplevel().unwrap().wl_surface())
-        .unwrap();
-    assert_eq!(output, Some(&b));
-    f.niri_state().minimize_window(Some(first));
-    f.niri().remove_output(&b);
-    assert!(elements(&mut f, &b).is_empty());
-    assert!(f.niri_state().restore_window(Some(first), Some(&a), true));
-    f.niri_complete_animations();
-    assert!(red_pixels(&mut f, &a, RenderTarget::Output) > 10000);
+    for effect in ["scale", "genie"] {
+        let mut f = setup_with_effect(
+            r#"output "headless-2" { scale 1.5; transform "90"; }"#,
+            effect,
+        );
+        let client = f.add_client();
+        let (_, first) = window(&mut f, client, [u32::MAX, 0, 0]);
+        let (_, second) = window(&mut f, client, [0, 0, u32::MAX]);
+        f.niri_complete_animations();
+        set_time(f.niri(), Duration::ZERO);
+        let a = f.niri_output(1);
+        let b = f.niri_output(2);
+        let win = f.niri().find_window_by_id(first).unwrap();
+        let owner = Rc::new(());
+        let target = Rectangle::new((8., 120.).into(), (40., 40.).into());
+        f.niri().layout.set_window_animation_targets(
+            &owner,
+            vec![AnimationTarget {
+                id: win.clone(),
+                output: b.clone(),
+                rect: target,
+                edge: DockEdge::Left,
+                layer: None,
+            }],
+        );
+        assert!(f.niri_state().minimize_window(Some(first)));
+        assert_eq!(f.niri().layout.windows().count(), 1);
+        assert!(f.niri().find_window_by_id(second).is_some());
+        assert!(f.niri_state().restore_window(Some(first), Some(&b), true));
+        assert!(elements(&mut f, &a).is_empty());
+        assert_eq!(elements(&mut f, &b).len(), 1);
+        if effect == "scale" {
+            assert_eq!(elements(&mut f, &b), vec![target]);
+        }
+        assert_eq!(red_pixels(&mut f, &b, RenderTarget::Output), 0);
+        assert!(f.niri_state().minimize_window(Some(first)));
+        assert!(f.niri_state().restore_window(Some(first), Some(&b), true));
+        assert_eq!(elements(&mut f, &b).len(), 1);
+        f.niri_complete_animations();
+        assert!(elements(&mut f, &b).is_empty());
+        assert!(red_pixels(&mut f, &b, RenderTarget::Output) > 10000);
+        let (_, output) = f
+            .niri()
+            .layout
+            .find_window_and_output(win.toplevel().unwrap().wl_surface())
+            .unwrap();
+        assert_eq!(output, Some(&b));
+        f.niri_state().minimize_window(Some(first));
+        f.niri().remove_output(&b);
+        assert!(elements(&mut f, &b).is_empty());
+        assert!(f.niri_state().restore_window(Some(first), Some(&a), true));
+        f.niri_complete_animations();
+        assert!(red_pixels(&mut f, &a, RenderTarget::Output) > 10000);
+    }
 }
 
 #[test]
 fn egl_capture_privacy_and_disabled_animation_fallback() {
-    let mut f = setup(r#"window-rule { block-out-from "screen-capture"; }"#);
-    let client = f.add_client();
-    let (_, id) = window(&mut f, client, [u32::MAX, 0, 0]);
-    f.niri_complete_animations();
-    set_time(f.niri(), Duration::ZERO);
-    let output = f.niri_output(1);
-    f.niri_state().minimize_window(Some(id));
-    set_time(f.niri(), Duration::from_millis(500));
-    f.niri().advance_animations();
-    assert!(red_pixels(&mut f, &output, RenderTarget::Output) > 1000);
-    assert_eq!(red_pixels(&mut f, &output, RenderTarget::ScreenCapture), 0);
-    f.niri().clock.set_complete_instantly(true);
-    f.niri().advance_animations();
-    assert!(f.niri_state().restore_window(Some(id), Some(&output), true));
-    assert!(elements(&mut f, &output).is_empty());
-    assert!(red_pixels(&mut f, &output, RenderTarget::Output) > 10000);
+    for effect in ["scale", "genie"] {
+        let mut f = setup_with_effect(
+            r#"window-rule { block-out-from "screen-capture"; }"#,
+            effect,
+        );
+        let client = f.add_client();
+        let (_, id) = window(&mut f, client, [u32::MAX, 0, 0]);
+        f.niri_complete_animations();
+        set_time(f.niri(), Duration::ZERO);
+        let output = f.niri_output(1);
+        f.niri_state().minimize_window(Some(id));
+        set_time(f.niri(), Duration::from_millis(500));
+        f.niri().advance_animations();
+        assert!(red_pixels(&mut f, &output, RenderTarget::Output) > 1000);
+        assert_eq!(red_pixels(&mut f, &output, RenderTarget::ScreenCapture), 0);
+        f.niri().clock.set_complete_instantly(true);
+        f.niri().advance_animations();
+        assert!(f.niri_state().restore_window(Some(id), Some(&output), true));
+        assert!(elements(&mut f, &output).is_empty());
+        assert!(red_pixels(&mut f, &output, RenderTarget::Output) > 10000);
+    }
 }
 
 #[test]
@@ -296,19 +374,28 @@ fn egl_ipc_target_owner_disconnect_clears_hint() {
     f.niri_complete_animations();
     set_time(f.niri(), Duration::ZERO);
     drop(reader);
-    // Dispatch the socket EOF and the cleanup idle callback.
-    for _ in 0..10 {
+    // Socket readiness and the cleanup idle callback can take more than one
+    // dispatch under a parallel test load. Observe the public endpoint result.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
         f.state.server.dispatch();
+        assert!(f.niri_state().minimize_window(Some(id)));
+        set_time(f.niri(), Duration::from_millis(500));
+        f.niri().advance_animations();
+        let midpoint = elements(&mut f, &output)[0];
+        if midpoint.loc.y > 280. {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "publisher hint survived disconnect: {midpoint:?}"
+        );
+        f.niri_complete_animations();
+        assert!(f.niri_state().restore_window(Some(id), Some(&output), true));
+        f.niri_complete_animations();
+        set_time(f.niri(), Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(1));
     }
-    let output = f.niri_output(1);
-    assert!(f.niri_state().minimize_window(Some(id)));
-    set_time(f.niri(), Duration::from_millis(500));
-    f.niri().advance_animations();
-    let midpoint = elements(&mut f, &output)[0];
-    assert!(
-        midpoint.loc.y > 280.,
-        "uses bottom fallback after publisher disconnect: {midpoint:?}"
-    );
 }
 
 fn tile_rect(f: &mut Fixture, id: MappedId) -> Rectangle<f64, Logical> {
@@ -468,34 +555,135 @@ fn target_validation_and_surface_lifetime() {
 
 #[test]
 fn egl_lock_cancels_snapshot_without_revealing_window() {
-    use crate::niri::LockState;
-    let mut f = setup("");
-    let client = f.add_client();
-    let (_, id) = window(&mut f, client, [u32::MAX, 0, 0]);
-    f.niri_complete_animations();
-    let output = f.niri_output(1);
-    f.niri_state().minimize_window(Some(id));
-    assert_eq!(elements(&mut f, &output).len(), 1);
-    let c = f.client(client);
-    let _lock = c
-        .state
-        .session_lock_manager
-        .as_ref()
-        .unwrap()
-        .lock(&c.qh, ());
-    f.double_roundtrip(client);
-    if let LockState::WaitingForSurfaces {
-        confirmation,
-        deadline_token,
-    } = std::mem::take(&mut f.niri().lock_state)
-    {
-        f.niri().event_loop.remove(deadline_token);
-        f.niri().lock_state = LockState::Locking(confirmation);
-    } else {
-        panic!("expected a lock request");
+    for effect in ["scale", "genie"] {
+        use crate::niri::LockState;
+        let mut f = setup_with_effect("", effect);
+        let client = f.add_client();
+        let (_, id) = window(&mut f, client, [u32::MAX, 0, 0]);
+        f.niri_complete_animations();
+        let output = f.niri_output(1);
+        f.niri_state().minimize_window(Some(id));
+        assert_eq!(elements(&mut f, &output).len(), 1);
+        let c = f.client(client);
+        let _lock = c
+            .state
+            .session_lock_manager
+            .as_ref()
+            .unwrap()
+            .lock(&c.qh, ());
+        f.double_roundtrip(client);
+        if let LockState::WaitingForSurfaces {
+            confirmation,
+            deadline_token,
+        } = std::mem::take(&mut f.niri().lock_state)
+        {
+            f.niri().event_loop.remove(deadline_token);
+            f.niri().lock_state = LockState::Locking(confirmation);
+        } else {
+            panic!("expected a lock request");
+        }
+        f.niri().advance_animations();
+        assert!(elements(&mut f, &output).is_empty());
+        assert_eq!(red_pixels(&mut f, &output, RenderTarget::Output), 0);
+        assert!(!f.niri_state().restore_window(Some(id), None, true));
     }
-    f.niri().advance_animations();
-    assert!(elements(&mut f, &output).is_empty());
-    assert_eq!(red_pixels(&mut f, &output, RenderTarget::Output), 0);
-    assert!(!f.niri_state().restore_window(Some(id), None, true));
+}
+
+#[test]
+fn egl_genie_deforms_all_edges_and_restores_in_reverse() {
+    use crate::render_helpers::shaders::{ProgramType, Shaders};
+    for edge in [
+        DockEdge::Left,
+        DockEdge::Right,
+        DockEdge::Top,
+        DockEdge::Bottom,
+    ] {
+        let mut f = setup_with_effect("window-rule { open-floating true; }", "genie");
+        assert!(f
+            .niri_state()
+            .backend
+            .with_primary_renderer(|r| Shaders::get(r).program(ProgramType::Genie).is_some())
+            .unwrap());
+        let client = f.add_client();
+        let (surface, id) = window(&mut f, client, [u32::MAX, 0, 0]);
+        stamp(&mut f, client, &surface, 25, 25, [u32::MAX; 3]);
+        stamp(&mut f, client, &surface, 175, 130, [0, 0, u32::MAX]);
+        f.niri_complete_animations();
+        set_time(f.niri(), Duration::ZERO);
+        let output = f.niri_output(1);
+        let win = f.niri().find_window_by_id(id).unwrap();
+        let target = match edge {
+            DockEdge::Left => Rectangle::new((8., 440.).into(), (40., 40.).into()),
+            DockEdge::Right => Rectangle::new((752., 120.).into(), (40., 40.).into()),
+            DockEdge::Top => Rectangle::new((120., 8.).into(), (40., 40.).into()),
+            DockEdge::Bottom => Rectangle::new((500., 552.).into(), (40., 40.).into()),
+        };
+        let owner = Rc::new(());
+        f.niri().layout.set_window_animation_targets(
+            &owner,
+            vec![AnimationTarget {
+                id: win,
+                output: output.clone(),
+                rect: target,
+                edge,
+                layer: None,
+            }],
+        );
+        let before = pixels(&mut f, &output, RenderTarget::Output);
+        f.niri_state().minimize_window(Some(id));
+        let initial = pixels(&mut f, &output, RenderTarget::Output);
+        assert!(before
+            .chunks_exact(4)
+            .map(is_red)
+            .eq(initial.chunks_exact(4).map(is_red)));
+        save_frame(&format!("{edge:?}-0"), &initial);
+        let mut middle = Vec::new();
+        for ms in [150, 300, 500, 700, 850] {
+            set_time(f.niri(), Duration::from_millis(ms));
+            f.niri().advance_animations();
+            let frame = pixels(&mut f, &output, RenderTarget::Output);
+            assert!(frame.chunks_exact(4).any(is_red), "{edge:?} at {ms}");
+            save_frame(&format!("{edge:?}-{ms}"), &frame);
+            if ms == 500 {
+                middle = frame;
+            }
+        }
+        // A rigid rectangle cannot pass this: near-Dock cross-sections must be narrower.
+        let mut widths = vec![0; 800];
+        for (i, p) in middle.chunks_exact(4).enumerate() {
+            if !is_red(p) {
+                continue;
+            }
+            let x = i % 800;
+            let y = i / 800;
+            let row = match edge {
+                DockEdge::Bottom => y,
+                DockEdge::Top => 599 - y,
+                DockEdge::Right => x,
+                DockEdge::Left => 799 - x,
+            };
+            widths[row] += 1;
+        }
+        let widths: Vec<_> = widths.into_iter().filter(|w| *w > 0).collect();
+        assert!(widths.len() > 40, "{edge:?}");
+        let n = widths.len() / 4;
+        let far: usize = widths[..n].iter().sum();
+        let near: usize = widths[widths.len() - n..].iter().sum();
+        assert!(far > near * 2, "{edge:?}: far={far} near={near}");
+        f.niri_complete_animations();
+        assert!(f.niri_state().restore_window(Some(id), None, true));
+        set_time(f.niri(), Duration::from_millis(1350));
+        f.niri().advance_animations();
+        let restored = pixels(&mut f, &output, RenderTarget::Output);
+        assert!(
+            middle
+                .chunks_exact(4)
+                .map(is_red)
+                .eq(restored.chunks_exact(4).map(is_red)),
+            "reverse {edge:?}"
+        );
+        f.niri_complete_animations();
+        assert!(elements(&mut f, &output).is_empty());
+        assert!(red_pixels(&mut f, &output, RenderTarget::Output) > 10000);
+    }
 }

@@ -1,12 +1,14 @@
 //! Output-local snapshot transitions. Window ownership stays in the regular layout/minimized set.
+use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use anyhow::Context;
+use niri_config::animations::MinimizeEffect;
 use niri_config::BlockOutFrom;
 use niri_ipc::DockEdge;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::Kind;
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture, Uniform};
 use smithay::desktop::{layer_map_for_output, LayerSurface};
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Size, Transform};
@@ -14,6 +16,16 @@ use smithay::utils::{Logical, Point, Rectangle, Scale, Size, Transform};
 use super::tile::TileRenderSnapshot;
 use super::{Layout, LayoutElement};
 use crate::animation::Animation;
+use crate::niri_render_elements;
+use crate::render_helpers::shader_element::ShaderRenderElement;
+use crate::render_helpers::shaders::{ProgramType, Shaders};
+
+niri_render_elements! {
+    MinimizeAnimationRenderElement => {
+        Texture = PrimaryGpuTextureRenderElement,
+        Shader = ShaderRenderElement,
+    }
+}
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::render_helpers::{render_to_encompassing_texture, RenderTarget};
@@ -102,6 +114,8 @@ pub struct MinimizeAnimation<I> {
     window_rect: Rectangle<f64, Logical>,
     /// Fixed for this operation, unaffected by subsequent Dock motion or disconnection.
     dock_rect: Rectangle<f64, Logical>,
+    effect: MinimizeEffect,
+    edge: DockEdge,
     source_size: Size<f64, Logical>,
     output_size: Size<f64, Logical>,
     output_scale: f64,
@@ -124,6 +138,8 @@ impl<I> MinimizeAnimation<I> {
         dock_rect: Rectangle<f64, Logical>,
         restoring: bool,
         anim: Animation,
+        effect: MinimizeEffect,
+        edge: DockEdge,
     ) -> anyhow::Result<Self> {
         let scale = Scale::from(output.current_scale().fractional_scale());
         let mut bake = |elements: Vec<_>| -> anyhow::Result<Image> {
@@ -159,6 +175,8 @@ impl<I> MinimizeAnimation<I> {
             output_transform: output.current_transform(),
             output,
             restoring,
+            effect,
+            edge,
             window_rect,
             dock_rect,
             source_size: snapshot.size,
@@ -179,7 +197,7 @@ impl<I> MinimizeAnimation<I> {
         interpolate(from, to, self.anim.clamped_value())
     }
 
-    pub fn render(&self, target: RenderTarget) -> PrimaryGpuTextureRenderElement {
+    pub fn render(&self, target: RenderTarget) -> MinimizeAnimationRenderElement {
         let image = if target.should_block_out(self.block_out_from) {
             &self.blocked
         } else if target != RenderTarget::Output {
@@ -201,6 +219,11 @@ impl<I> MinimizeAnimation<I> {
         } else {
             ((1. - p) / 0.15).min(1.)
         };
+        if self.effect == MinimizeEffect::Genie {
+            if let Some(element) = self.render_genie(image, opacity as f32, p) {
+                return element.into();
+            }
+        }
         PrimaryGpuTextureRenderElement(TextureRenderElement::from_texture_buffer(
             image.buffer.clone(),
             location,
@@ -209,6 +232,101 @@ impl<I> MinimizeAnimation<I> {
             Some(size),
             Kind::Unspecified,
         ))
+        .into()
+    }
+
+    fn render_genie(
+        &self,
+        image: &Image,
+        opacity: f32,
+        progress: f64,
+    ) -> Option<ShaderRenderElement> {
+        let window = self.window_rect;
+        let target = self.dock_rect;
+        let far = |rect: Rectangle<f64, Logical>| match self.edge {
+            DockEdge::Bottom => rect.loc.y,
+            DockEdge::Top => -rect.loc.y - rect.size.h,
+            DockEdge::Right => rect.loc.x,
+            DockEdge::Left => -rect.loc.x - rect.size.w,
+        };
+        // An unusual hint behind the window can fold the sheet over itself.
+        // Keep ordinary scale as the well-defined fallback for that geometry.
+        if far(target) < far(window) {
+            return None;
+        }
+        let texture_size = image.buffer.logical_size();
+        let mut area = window.merge(target);
+        let padding = Point::from((
+            image
+                .offset
+                .x
+                .abs()
+                .max((image.offset.x + texture_size.w - self.source_size.w).abs())
+                / self.source_size.w
+                * area.size.w,
+            image
+                .offset
+                .y
+                .abs()
+                .max((image.offset.y + texture_size.h - self.source_size.h).abs())
+                / self.source_size.h
+                * area.size.h,
+        ));
+        area.loc -= padding;
+        area.size.w += 2. * padding.x;
+        area.size.h += 2. * padding.y;
+        area = area.intersection(Rectangle::from_size(self.output_size))?;
+        let uniform_rect = |r: Rectangle<f64, Logical>| {
+            [
+                r.loc.x as f32,
+                r.loc.y as f32,
+                r.size.w as f32,
+                r.size.h as f32,
+            ]
+        };
+        Some(
+            ShaderRenderElement::new(
+                ProgramType::Genie,
+                area.size,
+                None,
+                self.output_scale as f32,
+                opacity,
+                Rc::new([
+                    Uniform::new("window_rect", uniform_rect(window)),
+                    Uniform::new("target_rect", uniform_rect(target)),
+                    Uniform::new(
+                        "texture_rect",
+                        [
+                            (image.offset.x / self.source_size.w) as f32,
+                            (image.offset.y / self.source_size.h) as f32,
+                            (texture_size.w / self.source_size.w) as f32,
+                            (texture_size.h / self.source_size.h) as f32,
+                        ],
+                    ),
+                    Uniform::new("area_origin", [area.loc.x as f32, area.loc.y as f32]),
+                    Uniform::new(
+                        "edge",
+                        match self.edge {
+                            DockEdge::Bottom => 0_f32,
+                            DockEdge::Left => 1.,
+                            DockEdge::Right => 2.,
+                            DockEdge::Top => 3.,
+                        },
+                    ),
+                    Uniform::new(
+                        "morph",
+                        if self.restoring {
+                            1. - progress as f32
+                        } else {
+                            progress as f32
+                        },
+                    ),
+                ]),
+                HashMap::from([(String::from("niri_tex"), image.buffer.texture().clone())]),
+                Kind::Unspecified,
+            )
+            .with_location(area.loc),
+        )
     }
 }
 
@@ -315,7 +433,7 @@ impl<W: LayoutElement> Layout<W> {
             return None;
         }
         let size = output_size(&output);
-        let dock_rect = self
+        let (dock_rect, edge) = self
             .minimize_targets
             .iter()
             .rev()
@@ -338,10 +456,19 @@ impl<W: LayoutElement> Layout<W> {
                     &output,
                     hint.edge,
                 )
+                .map(|rect| (rect, hint.edge))
             })
             .unwrap_or_else(|| {
-                edge_target(size, DockEdge::Bottom, (size.w / 2. - 16., size.h).into())
+                (
+                    edge_target(size, DockEdge::Bottom, (size.w / 2. - 16., size.h).into()),
+                    DockEdge::Bottom,
+                )
             });
+        let effect = if Shaders::get(renderer).program(ProgramType::Genie).is_some() {
+            self.options.animations.window_minimize_effect
+        } else {
+            MinimizeEffect::Scale
+        };
         match MinimizeAnimation::new(
             renderer,
             id.clone(),
@@ -351,6 +478,8 @@ impl<W: LayoutElement> Layout<W> {
             dock_rect,
             restoring,
             anim,
+            effect,
+            edge,
         ) {
             Ok(animation) => Some(animation),
             Err(err) => {
@@ -422,7 +551,7 @@ impl<W: LayoutElement> Layout<W> {
         &self,
         output: &Output,
         target: RenderTarget,
-        push: &mut dyn FnMut(PrimaryGpuTextureRenderElement),
+        push: &mut dyn FnMut(MinimizeAnimationRenderElement),
     ) {
         for animation in self.minimize_animations.iter().rev() {
             if animation.output == *output {
