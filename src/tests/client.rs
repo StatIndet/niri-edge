@@ -11,11 +11,25 @@ use calloop::EventLoop;
 use calloop_wayland_source::WaylandSource;
 use single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1;
 use smithay::reexports::wayland_protocols::wp::single_pixel_buffer;
+use smithay::reexports::wayland_protocols::wp::idle_inhibit::zv1::client::{
+    zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1,
+    zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
+};
 use smithay::reexports::wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use smithay::reexports::wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_surface::{self, XdgSurface};
+use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_popup::{self, XdgPopup};
+use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_positioner::XdgPositioner;
+use smithay::reexports::wayland_protocols::ext::session_lock::v1::client::{
+    ext_session_lock_manager_v1::ExtSessionLockManagerV1,
+    ext_session_lock_v1::ExtSessionLockV1,
+};
 use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_toplevel::{self, XdgToplevel};
 use smithay::reexports::wayland_protocols::xdg::shell::client::xdg_wm_base::{self, XdgWmBase};
+use smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::client::{
+    zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
+    zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
+};
 use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::{
     self, ZwlrLayerShellV1,
 };
@@ -33,6 +47,9 @@ use wayland_client::protocol::wl_display::WlDisplay;
 use wayland_client::protocol::wl_output::{self, WlOutput};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_surface::{self, WlSurface};
+use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
+use wayland_client::protocol::wl_subsurface::WlSubsurface;
+use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
 
 use crate::utils::id::IdCounter;
@@ -53,9 +70,16 @@ pub struct State {
     pub outputs: HashMap<WlOutput, String>,
 
     pub compositor: Option<WlCompositor>,
+    pub subcompositor: Option<WlSubcompositor>,
+    pub idle_inhibit_manager: Option<ZwpIdleInhibitManagerV1>,
     pub xdg_wm_base: Option<XdgWmBase>,
     pub layer_shell: Option<ZwlrLayerShellV1>,
     pub virtual_pointer_manager: Option<ZwlrVirtualPointerManagerV1>,
+    pub foreign_toplevel_manager: Option<ZwlrForeignToplevelManagerV1>,
+    pub foreign_toplevels: Vec<ForeignToplevel>,
+    pub seat: Option<WlSeat>,
+    pub session_lock_manager: Option<ExtSessionLockManagerV1>,
+    pub popups: Vec<Popup>,
     pub spbm: Option<WpSinglePixelBufferManagerV1>,
     pub viewporter: Option<WpViewporter>,
 
@@ -74,8 +98,24 @@ pub struct Window {
     pub pending_configure: Configure,
     pub configures_received: Vec<(u32, Configure)>,
     pub close_requested: bool,
+    pub wm_capabilities: Vec<xdg_toplevel::WmCapabilities>,
 
     pub configures_looked_at: usize,
+}
+
+pub struct Popup {
+    pub surface: WlSurface,
+    pub xdg_surface: XdgSurface,
+    pub popup: XdgPopup,
+    pub done: bool,
+}
+
+pub struct ForeignToplevel {
+    pub handle: ZwlrForeignToplevelHandleV1,
+    pub title: String,
+    pub app_id: String,
+    pub states: Vec<zwlr_foreign_toplevel_handle_v1::State>,
+    pub closed: bool,
 }
 
 pub struct LayerSurface {
@@ -180,9 +220,16 @@ impl Client {
             globals: Vec::new(),
             outputs: HashMap::new(),
             compositor: None,
+            subcompositor: None,
+            idle_inhibit_manager: None,
             xdg_wm_base: None,
             layer_shell: None,
             virtual_pointer_manager: None,
+            foreign_toplevel_manager: None,
+            foreign_toplevels: Vec::new(),
+            seat: None,
+            session_lock_manager: None,
+            popups: Vec::new(),
             spbm: None,
             viewporter: None,
             windows: Vec::new(),
@@ -270,6 +317,7 @@ impl State {
             pending_configure: Configure::default(),
             configures_received: Vec::new(),
             close_requested: false,
+            wm_capabilities: Vec::new(),
 
             configures_looked_at: 0,
         };
@@ -510,6 +558,10 @@ impl Dispatch<WlRegistry, ()> for State {
                 if interface == WlCompositor::interface().name {
                     let version = min(version, WlCompositor::interface().version);
                     state.compositor = Some(registry.bind(name, version, qh, ()));
+                } else if interface == WlSubcompositor::interface().name {
+                    state.subcompositor = Some(registry.bind(name, 1, qh, ()));
+                } else if interface == ZwpIdleInhibitManagerV1::interface().name {
+                    state.idle_inhibit_manager = Some(registry.bind(name, 1, qh, ()));
                 } else if interface == XdgWmBase::interface().name {
                     let version = min(version, XdgWmBase::interface().version);
                     state.xdg_wm_base = Some(registry.bind(name, version, qh, ()));
@@ -525,6 +577,18 @@ impl Dispatch<WlRegistry, ()> for State {
                 } else if interface == WpViewporter::interface().name {
                     let version = min(version, WpViewporter::interface().version);
                     state.viewporter = Some(registry.bind(name, version, qh, ()));
+                } else if interface == ZwlrForeignToplevelManagerV1::interface().name {
+                    state.foreign_toplevel_manager =
+                        Some(registry.bind(name, min(version, 3), qh, ()));
+                } else if interface == ExtSessionLockManagerV1::interface().name {
+                    state.session_lock_manager = Some(registry.bind(name, 1, qh, ()));
+                } else if interface == WlSeat::interface().name {
+                    state.seat = Some(registry.bind(
+                        name,
+                        min(version, WlSeat::interface().version),
+                        qh,
+                        (),
+                    ));
                 } else if interface == WlOutput::interface().name {
                     let version = min(version, WlOutput::interface().version);
                     let output = registry.bind(name, version, qh, ());
@@ -644,6 +708,14 @@ impl Dispatch<XdgSurface, ()> for State {
     ) {
         match event {
             xdg_surface::Event::Configure { serial } => {
+                if state
+                    .popups
+                    .iter()
+                    .any(|popup| popup.xdg_surface == *xdg_surface)
+                {
+                    xdg_surface.ack_configure(serial);
+                    return;
+                }
                 let window = state
                     .windows
                     .iter_mut()
@@ -693,7 +765,13 @@ impl Dispatch<XdgToplevel, ()> for State {
             xdg_toplevel::Event::ConfigureBounds { width, height } => {
                 window.pending_configure.bounds = Some((width, height));
             }
-            xdg_toplevel::Event::WmCapabilities { .. } => (),
+            xdg_toplevel::Event::WmCapabilities { capabilities } => {
+                window.wm_capabilities = capabilities
+                    .chunks_exact(4)
+                    .map(|bytes| u32::from_ne_bytes(bytes.try_into().unwrap()))
+                    .filter_map(|value| xdg_toplevel::WmCapabilities::try_from(value).ok())
+                    .collect();
+            }
             _ => unreachable!(),
         }
     }
@@ -783,5 +861,118 @@ impl Dispatch<WpViewport, ()> for State {
         _qhandle: &QueueHandle<Self>,
     ) {
         unreachable!()
+    }
+}
+
+wayland_client::delegate_noop!(State: ignore WlSeat);
+
+impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _proxy: &ZwlrForeignToplevelManagerV1,
+        event: zwlr_foreign_toplevel_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } = event {
+            state.foreign_toplevels.push(ForeignToplevel {
+                handle: toplevel,
+                title: String::new(),
+                app_id: String::new(),
+                states: Vec::new(),
+                closed: false,
+            });
+        }
+    }
+
+    wayland_client::event_created_child!(State, ZwlrForeignToplevelManagerV1, [
+        0 => (ZwlrForeignToplevelHandleV1, ())
+    ]);
+}
+
+impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &ZwlrForeignToplevelHandleV1,
+        event: zwlr_foreign_toplevel_handle_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        let window = state
+            .foreign_toplevels
+            .iter_mut()
+            .find(|w| w.handle == *proxy)
+            .unwrap();
+        match event {
+            zwlr_foreign_toplevel_handle_v1::Event::Title { title } => window.title = title,
+            zwlr_foreign_toplevel_handle_v1::Event::AppId { app_id } => window.app_id = app_id,
+            zwlr_foreign_toplevel_handle_v1::Event::State { state } => {
+                window.states = state
+                    .chunks_exact(4)
+                    .map(|bytes| u32::from_ne_bytes(bytes.try_into().unwrap()))
+                    .filter_map(|value| {
+                        zwlr_foreign_toplevel_handle_v1::State::try_from(value).ok()
+                    })
+                    .collect();
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::Closed => window.closed = true,
+            _ => (),
+        }
+    }
+}
+
+wayland_client::delegate_noop!(State: ExtSessionLockManagerV1);
+wayland_client::delegate_noop!(State: WlSubcompositor);
+wayland_client::delegate_noop!(State: WlSubsurface);
+wayland_client::delegate_noop!(State: ZwpIdleInhibitManagerV1);
+wayland_client::delegate_noop!(State: ZwpIdleInhibitorV1);
+wayland_client::delegate_noop!(State: ignore ExtSessionLockV1);
+wayland_client::delegate_noop!(State: XdgPositioner);
+
+impl Client {
+    pub fn create_popup(&mut self, parent: &WlSurface) -> &mut Popup {
+        let parent = self.window(parent).xdg_surface.clone();
+        let state = &mut self.state;
+        let surface = state
+            .compositor
+            .as_ref()
+            .unwrap()
+            .create_surface(&state.qh, ());
+        let wm_base = state.xdg_wm_base.as_ref().unwrap();
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &state.qh, ());
+        let positioner = wm_base.create_positioner(&state.qh, ());
+        positioner.set_size(10, 10);
+        positioner.set_anchor_rect(0, 0, 10, 10);
+        let popup = xdg_surface.get_popup(Some(&parent), &positioner, &state.qh, ());
+        positioner.destroy();
+        state.popups.push(Popup {
+            surface,
+            xdg_surface,
+            popup,
+            done: false,
+        });
+        state.popups.last_mut().unwrap()
+    }
+}
+
+impl Dispatch<XdgPopup, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &XdgPopup,
+        event: xdg_popup::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_popup::Event::PopupDone = event {
+            state
+                .popups
+                .iter_mut()
+                .find(|popup| popup.popup == *proxy)
+                .unwrap()
+                .done = true;
+        }
     }
 }

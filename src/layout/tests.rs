@@ -15,6 +15,7 @@ use super::*;
 
 mod animations;
 mod fullscreen;
+mod minimized;
 
 impl<W: LayoutElement> Default for Layout<W> {
     fn default() -> Self {
@@ -455,6 +456,14 @@ enum Op {
         ws_name: usize,
     },
     CloseWindow(#[proptest(strategy = "1..=5usize")] usize),
+    MinimizeWindow(#[proptest(strategy = "prop::option::of(1..=5usize)")] Option<usize>),
+    RestoreWindow {
+        #[proptest(strategy = "prop::option::of(1..=5usize)")]
+        id: Option<usize>,
+        #[proptest(strategy = "prop::option::of(1..=5usize)")]
+        output: Option<usize>,
+        activate: bool,
+    },
     FullscreenWindow(#[proptest(strategy = "1..=5usize")] usize),
     SetFullscreenWindow {
         #[proptest(strategy = "1..=5usize")]
@@ -894,7 +903,7 @@ impl Op {
                 layout.unset_workspace_name(ws_ref);
             }
             Op::AddWindow { mut params } => {
-                if layout.has_window(&params.id) {
+                if layout.has_managed_window(&params.id) {
                     return;
                 }
                 if let Some(parent_id) = params.parent_id {
@@ -919,6 +928,9 @@ impl Op {
                 mut params,
                 next_to_id,
             } => {
+                if layout.has_managed_window(&params.id) {
+                    return;
+                }
                 let mut found_next_to = false;
 
                 if let Some(InteractiveMoveState::Moving(move_)) = &layout.interactive_move {
@@ -988,6 +1000,9 @@ impl Op {
                 mut params,
                 ws_name,
             } => {
+                if layout.has_managed_window(&params.id) {
+                    return;
+                }
                 let ws_name = format!("ws{ws_name}");
                 let mut ws_id = None;
 
@@ -1060,6 +1075,36 @@ impl Op {
             }
             Op::CloseWindow(id) => {
                 layout.remove_window(&id, Transaction::new());
+            }
+            Op::MinimizeWindow(id) => {
+                let id = id.or_else(|| layout.focus().map(|window| *window.id()));
+                if let Some(id) = id {
+                    layout.minimize_window(&id);
+                }
+            }
+            Op::RestoreWindow {
+                id,
+                output,
+                activate,
+            } => {
+                let output = if let Some(id) = output {
+                    let Some(output) = layout
+                        .outputs()
+                        .find(|output| output.name() == format!("output{id}"))
+                        .cloned()
+                    else {
+                        return;
+                    };
+                    Some(output)
+                } else {
+                    None
+                };
+                let activate = if activate {
+                    ActivateWindow::Yes
+                } else {
+                    ActivateWindow::No
+                };
+                layout.restore_window(id.as_ref(), output.as_ref(), activate);
             }
             Op::FullscreenWindow(id) => {
                 if !layout.has_window(&id) {
@@ -1433,53 +1478,11 @@ impl Op {
                 }
             }
             Op::Communicate(id) => {
-                let mut update = false;
-
-                if let Some(InteractiveMoveState::Moving(move_)) = &layout.interactive_move {
-                    if move_.tile.window().0.id == id {
-                        if move_.tile.window().communicate() {
-                            update = true;
-                        }
-
-                        if update {
-                            // FIXME: serial.
-                            layout.update_window(&id, None);
-                        }
-                        return;
-                    }
-                }
-
-                match &mut layout.monitor_set {
-                    MonitorSet::Normal { monitors, .. } => {
-                        'outer: for mon in monitors {
-                            for ws in &mut mon.workspaces {
-                                for win in ws.windows() {
-                                    if win.0.id == id {
-                                        if win.communicate() {
-                                            update = true;
-                                        }
-                                        break 'outer;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    MonitorSet::NoOutputs { workspaces, .. } => {
-                        'outer: for ws in workspaces {
-                            for win in ws.windows() {
-                                if win.0.id == id {
-                                    if win.communicate() {
-                                        update = true;
-                                    }
-                                    break 'outer;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if update {
-                    // FIXME: serial.
+                let window = layout
+                    .managed_windows()
+                    .find(|(_, window)| *window.id() == id)
+                    .map(|(_, window)| window.clone());
+                if window.is_some_and(|window| window.communicate()) {
                     layout.update_window(&id, None);
                 }
             }
@@ -1694,6 +1697,18 @@ fn operations_dont_panic() {
         Op::CloseWindow(0),
         Op::CloseWindow(1),
         Op::CloseWindow(2),
+        Op::MinimizeWindow(None),
+        Op::MinimizeWindow(Some(1)),
+        Op::RestoreWindow {
+            id: None,
+            output: None,
+            activate: true,
+        },
+        Op::RestoreWindow {
+            id: Some(1),
+            output: Some(2),
+            activate: false,
+        },
         Op::FullscreenWindow(1),
         Op::FullscreenWindow(2),
         Op::FullscreenWindow(3),
@@ -1852,6 +1867,18 @@ fn operations_from_starting_state_dont_panic() {
         Op::CloseWindow(0),
         Op::CloseWindow(1),
         Op::CloseWindow(2),
+        Op::MinimizeWindow(None),
+        Op::MinimizeWindow(Some(1)),
+        Op::RestoreWindow {
+            id: None,
+            output: None,
+            activate: true,
+        },
+        Op::RestoreWindow {
+            id: Some(1),
+            output: Some(2),
+            activate: false,
+        },
         Op::FullscreenWindow(1),
         Op::FullscreenWindow(2),
         Op::FullscreenWindow(3),
@@ -3738,7 +3765,7 @@ fn parent_id_causes_loop(layout: &Layout<TestWindow>, id: usize, mut parent_id: 
     }
 
     'outer: loop {
-        for (_, win) in layout.windows() {
+        for (_, win) in layout.managed_windows() {
             if win.0.id == parent_id {
                 match win.0.parent_id.get() {
                     Some(new_parent_id) => {
