@@ -316,6 +316,7 @@ impl CompositorHandler for State {
                         .stop_casts_for_target(CastTarget::Window { id: id.get() });
 
                     self.niri.window_mru_ui.remove_window(id);
+                    self.niri.layout.forget_window_animation_targets(&window);
                     self.niri.layout.remove_window(&window, transaction.clone());
                     self.add_default_dmabuf_pre_commit_hook(surface);
 

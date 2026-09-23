@@ -51,7 +51,17 @@ pub struct IpcServer {
     event_stream_state: Rc<RefCell<EventStreamState>>,
 }
 
+impl Drop for ClientCtx {
+    fn drop(&mut self) {
+        let owner = self.animation_owner.clone();
+        self.event_loop.insert_idle(move |state| {
+            state.niri.layout.clear_window_animation_targets(&owner);
+        });
+    }
+}
+
 struct ClientCtx {
+    animation_owner: Rc<()>,
     event_loop: LoopHandle<'static, State>,
     scheduler: Scheduler<()>,
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
@@ -168,6 +178,7 @@ fn on_new_ipc_client(state: &mut State, stream: UnixStream) {
     let ipc_server = state.niri.ipc_server.as_ref().unwrap();
 
     let ctx = ClientCtx {
+        animation_owner: Rc::new(()),
         event_loop: state.niri.event_loop.clone(),
         scheduler: state.niri.scheduler.clone(),
         ipc_outputs: state.backend.ipc_outputs(),
@@ -275,7 +286,89 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
         Request::Version => Response::Version(version()),
         Request::Capabilities => Response::Capabilities(niri_ipc::Capabilities {
             window_minimization: true,
+            window_minimization_animation: true,
         }),
+        Request::SetWindowAnimationTargets { targets } => {
+            if targets.len() > 1024 {
+                return Err(String::from("too many window animation targets"));
+            }
+            let owner = ctx.animation_owner.clone();
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                let mut resolved = Vec::with_capacity(targets.len());
+                for target in targets {
+                    let Some(window) = state
+                        .niri
+                        .layout
+                        .managed_windows()
+                        .find(|(_, window)| window.id().get() == target.id)
+                        .map(|(_, window)| window.window.clone())
+                    else {
+                        // Windows may close between the shell snapshot and this request.
+                        continue;
+                    };
+                    let Some(output) = state
+                        .niri
+                        .global_space
+                        .outputs()
+                        .find(|output| output.name() == target.output)
+                        .cloned()
+                    else {
+                        continue;
+                    };
+                    let mut layer_surface = None;
+                    if let Some(namespace) = target.layer_namespace {
+                        let layers = layer_map_for_output(&output);
+                        let mut matches = layers
+                            .layers()
+                            .filter(|layer| layer.namespace() == namespace);
+                        let Some(layer) = matches.next() else {
+                            continue;
+                        };
+                        if !crate::utils::is_mapped(layer.layer_surface().wl_surface()) {
+                            continue;
+                        }
+                        // Never guess among multiple surfaces with the same name.
+                        if matches.next().is_some() {
+                            continue;
+                        }
+                        let Some(_) = layers.layer_geometry(layer) else {
+                            continue;
+                        };
+                        layer_surface = Some(layer.clone());
+                    }
+                    if crate::layout::minimize_animation::target_rect(
+                        target.rect,
+                        &output,
+                        target.edge,
+                    )
+                    .is_none()
+                    {
+                        let _ = tx
+                            .send_blocking(Err(String::from("invalid window animation rectangle")));
+                        return;
+                    }
+                    let [x, y, w, h] = target.rect;
+                    let rect = smithay::utils::Rectangle::new((x, y).into(), (w, h).into());
+                    resolved.push(crate::layout::minimize_animation::AnimationTarget {
+                        id: window,
+                        output,
+                        rect,
+                        edge: target.edge,
+                        layer: layer_surface,
+                    });
+                }
+                state
+                    .niri
+                    .layout
+                    .set_window_animation_targets(&owner, resolved);
+                let _ = tx.send_blocking(Ok(()));
+            });
+            rx.recv()
+                .await
+                .map_err(|_| String::from("compositor disconnected"))??;
+            Response::Handled
+        }
         Request::Outputs => {
             let ipc_outputs = ctx.ipc_outputs.lock().unwrap().clone();
             let outputs = ipc_outputs.values().cloned().map(|o| (o.name.clone(), o));

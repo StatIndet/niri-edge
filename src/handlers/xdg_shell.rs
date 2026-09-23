@@ -943,6 +943,7 @@ impl XdgShellHandler for State {
         let was_active = active_window == Some(&window);
 
         self.niri.window_mru_ui.remove_window(id);
+        self.niri.layout.forget_window_animation_targets(&window);
         self.niri.layout.remove_window(&window, transaction.clone());
 
         let surface = surface.wl_surface();

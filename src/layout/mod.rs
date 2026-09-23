@@ -79,6 +79,7 @@ pub mod closing_window;
 pub mod floating;
 pub mod focus_ring;
 pub mod insert_hint_element;
+pub mod minimize_animation;
 mod minimized;
 pub mod monitor;
 pub mod opening_window;
@@ -349,6 +350,8 @@ pub struct Layout<W: LayoutElement> {
     monitor_set: MonitorSet<W>,
     /// Live windows outside the ordinary layout, in minimization order.
     minimized_windows: Vec<minimized::MinimizedWindow<W>>,
+    minimize_animations: Vec<minimize_animation::MinimizeAnimation<W::Id>>,
+    minimize_targets: Vec<minimize_animation::TargetHint<W::Id>>,
     /// Whether the layout should draw as active.
     ///
     /// This normally indicates that the layout has keyboard focus, but not always. E.g. when the
@@ -728,6 +731,8 @@ impl<W: LayoutElement> Layout<W> {
         Self {
             monitor_set: MonitorSet::NoOutputs { workspaces: vec![] },
             minimized_windows: Vec::new(),
+            minimize_animations: Vec::new(),
+            minimize_targets: Vec::new(),
             is_active: true,
             last_active_workspace_id: HashMap::new(),
             interactive_move: None,
@@ -754,6 +759,8 @@ impl<W: LayoutElement> Layout<W> {
         Self {
             monitor_set: MonitorSet::NoOutputs { workspaces },
             minimized_windows: Vec::new(),
+            minimize_animations: Vec::new(),
+            minimize_targets: Vec::new(),
             is_active: true,
             last_active_workspace_id: HashMap::new(),
             interactive_move: None,
@@ -875,6 +882,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn remove_output(&mut self, output: &Output) {
+        self.remove_animation_output(output);
         self.monitor_set = match mem::take(&mut self.monitor_set) {
             MonitorSet::Normal {
                 mut monitors,
@@ -1146,6 +1154,7 @@ impl<W: LayoutElement> Layout<W> {
         window: &W::Id,
         transaction: Transaction,
     ) -> Option<RemovedTile<W>> {
+        self.cancel_window_animation(window);
         if let Some(idx) = self
             .minimized_windows
             .iter()
@@ -2811,9 +2820,17 @@ impl<W: LayoutElement> Layout<W> {
                 }
             }
         }
+        self.advance_minimize_animations();
     }
 
     pub fn are_animations_ongoing(&self, output: Option<&Output>) -> bool {
+        if self
+            .minimize_animations
+            .iter()
+            .any(|a| output.is_none_or(|o| a.output == *o))
+        {
+            return true;
+        }
         // Keep advancing animations if we might need to scroll the view.
         if let Some(dnd) = &self.dnd {
             if output.is_none_or(|output| *output == dnd.output) {

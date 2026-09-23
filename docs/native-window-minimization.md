@@ -79,11 +79,11 @@ desktop shell is running.
 `niri msg --json capabilities` returns:
 
 ```json
-{"window_minimization":true}
+{"window_minimization":true,"window_minimization_animation":true}
 ```
 
 The socket request is `"Capabilities"`; its successful reply is
-`{"Ok":{"Capabilities":{"window_minimization":true}}}`. This read-only query
+`{"Ok":{"Capabilities":{"window_minimization":true,"window_minimization_animation":true}}}`. This read-only query
 does not change focus or window state. Older compositors may reject the query;
 clients should treat that as an unavailable extension. The existing `Version`
 reply is unchanged.
@@ -116,12 +116,86 @@ minimize, unminimize, activate, and close requests. Foreign-toplevel handles sta
 alive while minimized. Unminimizing alone does not request activation; explicit
 activation and the native restore action do.
 
+## Scale transitions and Dock targets
+
+Minimization snapshots the visible tile before detaching it. The tiled layout
+closes the gap using its normal movement rules. Restoration inserts the real
+window first, then expands a snapshot toward that tile's current position; it does
+not animate to the old column or old output. The live tile is hidden only while
+its restore snapshot is running. Completion reveals the current client buffer
+without waiting indefinitely for a configure acknowledgement. A late client may
+therefore visibly resize after handoff. Rapid actions replace the previous
+transition; they do not duplicate window ownership or snapshot overlays.
+
+Both directions share the following configuration (280 ms, ease-out-cubic by
+default). Global animation disabling and slowdown apply too:
+
+```kdl
+animations {
+    window-minimize {
+        duration-ms 280
+        curve "ease-out-cubic"
+        // off
+    }
+}
+```
+
+A shell checks `window_minimization_animation` separately from basic minimization.
+An absent field means unavailable. It maintains a dedicated IPC connection and
+publishes the complete set of targets it owns as newline-delimited requests:
+
+```json
+{"SetWindowAnimationTargets":{"targets":[{"id":42,"output":"DP-1","rect":[24.5,8,48,48],"edge":"bottom","layer_namespace":"clavis-shell-dock"}]}}
+```
+
+The reply is `{"Ok":"Handled"}`. Keep the connection open; its hints are removed
+on disconnect. An empty array clears them. Each request replaces this connection's
+previous set, up to 1024 targets. Window IDs are exact IPC identities, including
+minimized windows. Missing windows or outputs are ignored. Invalid rectangles
+(nonfinite, nonpositive size, or any component beyond ±32768) reject the request
+without replacing the previous set. Different publishers can own independent
+sets; the most recently published matching target wins.
+
+Without `layer_namespace`, the rectangle is **output-local logical** `[x,y,w,h]`.
+With it, the rectangle is local to the unique mapped layer surface of that name
+on that output. Niri resolves its actual origin, so the shell need not guess a
+Wayland panel's global position. The surface identity is retained; unmapping or
+destroying it invalidates the hint. The origin is resolved again when starting an
+operation. Ambiguous or absent namespaces are ignored at publication. Do not
+multiply coordinates by the output scale. Negative desktop output positions and
+output rotation do not alter this local coordinate contract.
+
+`edge` accepts `left`, `right`, `top`, or `bottom`. Partially visible rectangles
+are clipped to the output; fully offscreen targets fall back to their indicated
+edge. A missing valid target uses the bottom center of the operation's output.
+A minimize uses its source output; a restore uses its destination output. Niri
+never interpolates between two desktop output coordinate spaces. Shells should
+publish current targets for every window represented by each Dock, independently
+of clicks, including auto-hide/magnification changes. Each animation freezes its
+resolved Dock endpoint. Later updates or disconnection affect only new operations.
+
+Snapshots render in output space, outside the old tile/workspace clipping bounds,
+while retaining capture block-out rules. They are released at completion,
+window closure, output removal/reconfiguration, overview entry, or session lock.
+The real window remains usable if animation preparation fails or animation is
+disabled. No GPU snapshot cache is retained for the duration of minimization;
+Dock thumbnail caching remains the shell's responsibility. The shared lifecycle
+is separate from the rectangle interpolation, which is the only effect supplied
+in this stage.
+
 ## Scope and validation
 
-Phase one provides immediate hiding and restoration. It does not include Dock
-integration, Genie animation, minimized-window overview previews, old-workspace
-restoration, or persistence across compositor restarts. Advertising protocol
+The fork supports rectangle scale transitions for minimization and restoration.
+Genie deformation, minimized-window overview previews, old-workspace restoration,
+and persistence across compositor restarts are not implemented. Advertising protocol
 support does not guarantee identical title-bar buttons in every application.
+
+Headless GLES tests use actual Wayland client buffers and full-output pixel
+readback to verify all four directions, snapshot/live handoff (including a stalled
+client), tiled insertion, floating restoration, fractional scale, rotated and
+multiple outputs, rapid actions, publisher/surface lifetime, cancellation, and
+capture privacy. Physical GPU and multi-monitor timing still require validation
+in a separately launched session.
 
 Contract tests cover CLI and KDL parsing, IPC wire formats, compatibility with
 older window snapshots, and equivalence between incremental window events and

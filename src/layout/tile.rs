@@ -101,6 +101,7 @@ pub struct Tile<W: LayoutElement> {
 
     /// Snapshot of the last render for use in the close animation.
     unmap_snapshot: Option<TileRenderSnapshot>,
+    pub(super) minimize_animation_hidden: bool,
 
     /// Extra damage for clipped surface corner radius changes.
     rounded_corner_damage: RoundedCornerDamage,
@@ -211,6 +212,7 @@ impl<W: LayoutElement> Tile<W> {
             alpha_animation: None,
             interactive_move_offset: Point::from((0., 0.)),
             unmap_snapshot: None,
+            minimize_animation_hidden: false,
             rounded_corner_damage: Default::default(),
             view_size,
             scale,
@@ -1361,6 +1363,9 @@ impl<W: LayoutElement> Tile<W> {
         push: &mut dyn FnMut(TileRenderElement<R>),
     ) {
         let _span = tracy_client::span!("Tile::render");
+        if self.minimize_animation_hidden {
+            return;
+        }
 
         let scale = Scale::from(self.scale);
 

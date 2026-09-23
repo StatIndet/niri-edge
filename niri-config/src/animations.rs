@@ -16,6 +16,7 @@ pub struct Animations {
     pub workspace_switch: WorkspaceSwitchAnim,
     pub window_open: WindowOpenAnim,
     pub window_close: WindowCloseAnim,
+    pub window_minimize: WindowMinimizeAnim,
     pub horizontal_view_movement: HorizontalViewMovementAnim,
     pub window_movement: WindowMovementAnim,
     pub window_resize: WindowResizeAnim,
@@ -36,6 +37,7 @@ impl Default for Animations {
             window_movement: Default::default(),
             window_open: Default::default(),
             window_close: Default::default(),
+            window_minimize: Default::default(),
             window_resize: Default::default(),
             config_notification_open_close: Default::default(),
             exit_confirmation_open_close: Default::default(),
@@ -60,6 +62,8 @@ pub struct AnimationsPart {
     pub window_open: Option<WindowOpenAnim>,
     #[knuffel(child)]
     pub window_close: Option<WindowCloseAnim>,
+    #[knuffel(child)]
+    pub window_minimize: Option<WindowMinimizeAnim>,
     #[knuffel(child)]
     pub horizontal_view_movement: Option<HorizontalViewMovementAnim>,
     #[knuffel(child)]
@@ -94,6 +98,7 @@ impl MergeWith<AnimationsPart> for Animations {
             workspace_switch,
             window_open,
             window_close,
+            window_minimize,
             horizontal_view_movement,
             window_movement,
             window_resize,
@@ -901,5 +906,36 @@ where
             stiffness,
             epsilon,
         })
+    }
+}
+
+/// Fork extension used for both minimization and restoration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowMinimizeAnim(pub Animation);
+
+impl Default for WindowMinimizeAnim {
+    fn default() -> Self {
+        Self(Animation {
+            off: false,
+            kind: Kind::Easing(EasingParams {
+                duration_ms: 280,
+                curve: Curve::EaseOutCubic,
+            }),
+        })
+    }
+}
+
+impl<S> knuffel::Decode<S> for WindowMinimizeAnim
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        let default = Self::default().0;
+        Ok(Self(Animation::decode_node(node, ctx, default, |_, _| {
+            Ok(false)
+        })?))
     }
 }

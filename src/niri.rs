@@ -1241,10 +1241,30 @@ impl State {
             let _ = PopupManager::dismiss_popup(&surface, &popup);
         }
         self.niri.layout.interactive_resize_end(&window);
+        self.niri.layout.interactive_move_end(&window);
+        self.niri.layout.cancel_window_animation(&window);
+        let output = self
+            .niri
+            .layout
+            .find_window_and_output(&surface)
+            .and_then(|(_, o)| o.cloned());
+        let mut animation = None;
+        if !self.niri.is_locked() {
+            self.store_unmap_snapshot(&window, output.as_ref());
+            self.backend.with_primary_renderer(|renderer| {
+                animation = self
+                    .niri
+                    .layout
+                    .prepare_minimize_animation(renderer, &window, false);
+            });
+        }
         if !self.niri.layout.minimize_window(&window) {
             return false;
         }
 
+        if let Some(animation) = animation {
+            self.niri.layout.start_minimize_animation(animation);
+        }
         self.niri.window_mru_ui.remove_window(id);
 
         // The detached surface no longer participates in output rendering, which normally
@@ -1301,14 +1321,30 @@ impl State {
         } else {
             ActivateWindow::No
         };
-        if self
+        let Some(restored) = self
             .niri
             .layout
             .restore_window(window.as_ref(), output, activation)
-            .is_none()
-        {
+        else {
             return false;
-        }
+        };
+        self.niri.layout.cancel_window_animation(&restored);
+        let surface = restored.toplevel().expect("no X11 support").wl_surface();
+        let output = self
+            .niri
+            .layout
+            .find_window_and_output(surface)
+            .and_then(|(_, o)| o.cloned());
+        self.store_unmap_snapshot(&restored, output.as_ref());
+        self.backend.with_primary_renderer(|renderer| {
+            if let Some(animation) = self
+                .niri
+                .layout
+                .prepare_minimize_animation(renderer, &restored, true)
+            {
+                self.niri.layout.start_minimize_animation(animation);
+            }
+        });
         if activate {
             self.niri.layer_shell_on_demand_focus = None;
             self.update_keyboard_focus();
@@ -4456,6 +4492,9 @@ impl Niri {
     }
 
     pub fn advance_animations(&mut self) {
+        if self.is_locked() {
+            self.layout.cancel_minimize_animations();
+        }
         let _span = tracy_client::span!("Niri::advance_animations");
 
         self.layout.advance_animations();
@@ -4768,6 +4807,8 @@ impl Niri {
             self.layout
                 .render_interactive_move_for_output(ctx.r(), output, &mut |elem| push(elem.into()));
 
+            self.layout
+                .render_minimize_animations(output, ctx.target, &mut |elem| push(elem.into()));
             mon.render_insert_hint_between_workspaces(ctx.renderer, &mut |elem| push(elem.into()));
 
             mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
@@ -4791,6 +4832,8 @@ impl Niri {
             self.layout
                 .render_interactive_move_for_output(ctx.r(), output, &mut |elem| push(elem.into()));
 
+            self.layout
+                .render_minimize_animations(output, ctx.target, &mut |elem| push(elem.into()));
             mon.render_insert_hint_between_workspaces(ctx.renderer, &mut |elem| push(elem.into()));
 
             // Macro instead of closure to avoid borrowing push().
