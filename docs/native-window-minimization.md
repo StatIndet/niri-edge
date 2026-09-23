@@ -127,8 +127,16 @@ without waiting indefinitely for a configure acknowledgement. A late client may
 therefore visibly resize after handoff. Rapid actions replace the previous
 transition; they do not duplicate window ownership or snapshot overlays.
 
-Both directions share the following configuration (280 ms, ease-out-cubic by
-default). Global animation disabling and slowdown apply too:
+Both directions share their timing. Without a `window-minimize` block, Scale uses
+280 ms / ease-out-cubic and Genie uses 550 ms / linear. The Genie preset is tuned
+for this implementation, not an Apple-specified duration. Global animation
+disabling and slowdown apply to both presets.
+
+A style-only include selects the corresponding preset. An explicit
+`window-minimize` block keeps the existing parsing semantics, even if empty or
+equal to the old default: unspecified fields use 280 ms / ease-out-cubic, and
+switching effects does not override them. Includes still replace an explicitly
+provided block as a whole. For example, this explicitly overrides Genie's preset:
 
 ```kdl
 animations {
@@ -148,6 +156,10 @@ restoration traverses the same shape in reverse. Shadows, borders, and the
 snapshot's orientation travel with the sheet. A missing shader or an unusual
 hint behind the source window falls back to Scale. Changing the setting affects
 new operations; an active operation keeps its selected effect.
+
+Genie fades out with `1 - smoothstep(0.94, 1.0, progress)` and fades in with
+`smoothstep(0.0, 0.04, progress)` (33 ms and 22 ms at the linear 550 ms preset).
+Scale, including Genie's rendering fallback, retains its original 15% fades.
 
 A shell checks `window_minimization_animation` separately from basic minimization,
 and checks `window_minimization_effects` before offering effect selection. An
@@ -234,6 +246,18 @@ cross-sections distinguish Genie deformation from rigid scaling. Set
 `tests::minimize_animation` to export a deterministic frame sequence for inspection.
 Physical GPU and multi-monitor timing still require validation
 in a separately launched session.
+
+`egl_effect_presets_use_elapsed_time_and_hand_back_to_live_window` exercises
+implicit presets at quarter-time intervals, all edges, fractional scale,
+cancellation and live-buffer handoff. The existing 1000 ms / linear geometry
+tests remain independent of the presets. The ignored
+`egl_export_genie_preset_sequence` test exports A (280 ms / ease-out-cubic), B
+(explicit 550 ms / linear) and the implicit Genie preset when
+`NIRI_TEST_ANIMATION_FRAMES` points to an existing directory. Numbered frames are
+sampled every 10 ms and must play at 100 fps; quarter-time stills are separate.
+For a continuous minimize/restore video, omit the final minimize hold frame,
+which shares its timestamp with restore frame zero. A/B here vary timing only;
+both use the opacity implementation in the tested build.
 
 Contract tests cover CLI and KDL parsing, IPC wire formats, compatibility with
 older window snapshots, and equivalence between incremental window events and

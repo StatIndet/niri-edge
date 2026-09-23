@@ -27,12 +27,24 @@ fn setup(extra: &str) -> Fixture {
 }
 
 fn setup_with_effect(extra: &str, effect: &str) -> Fixture {
-    let config = Config::parse_mem(&format!(r#"
+    setup_with_timing(
+        extra,
+        effect,
+        "window-minimize { duration-ms 1000; curve \"linear\"; }",
+    )
+}
+
+fn setup_with_timing(extra: &str, effect: &str, timing: &str) -> Fixture {
+    let config = Config::parse_mem(&format!(
+        r#"
         layout {{ gaps 0; border {{ off; }}; focus-ring {{ off; }}; shadow {{ off; }}; }}
         hotkey-overlay {{ skip-at-startup; }}
-        animations {{ window-open {{ off; }}; window-minimize {{ duration-ms 1000; curve "linear"; }}; window-minimize-effect "{effect}"; }}
+        animations {{ window-open {{ off; }}; {timing}
+ window-minimize-effect "{effect}"; }}
         {extra}
-    "#)).unwrap();
+    "#
+    ))
+    .unwrap();
     let mut f = Fixture::with_config(config);
     f.niri_state().backend.headless().add_renderer().unwrap();
     f.add_output(1, (800, 600));
@@ -686,4 +698,251 @@ fn egl_genie_deforms_all_edges_and_restores_in_reverse() {
         assert!(elements(&mut f, &output).is_empty());
         assert!(red_pixels(&mut f, &output, RenderTarget::Output) > 10000);
     }
+}
+
+/// Optional deterministic exports, sampled every 10 ms: play numbered frames at 100 fps.
+/// Quarter-time stills are separate and must not be inserted into the playback sequence.
+#[test]
+#[ignore = "set NIRI_TEST_ANIMATION_FRAMES to export preset comparisons"]
+fn egl_export_genie_preset_sequence() {
+    assert!(std::env::var_os("NIRI_TEST_ANIMATION_FRAMES").is_some());
+    for (name, timing, duration) in [
+        (
+            "A",
+            "window-minimize { duration-ms 280; curve \"ease-out-cubic\"; }",
+            280_u64,
+        ),
+        (
+            "B",
+            "window-minimize { duration-ms 550; curve \"linear\"; }",
+            550,
+        ),
+        ("default", "", 550),
+    ] {
+        let mut f = setup_with_timing("window-rule { open-floating true; }", "genie", timing);
+        let client = f.add_client();
+        let (surface, id) = window(&mut f, client, [u32::MAX, 0, 0]);
+        stamp(&mut f, client, &surface, 25, 25, [u32::MAX; 3]);
+        stamp(&mut f, client, &surface, 175, 130, [0, 0, u32::MAX]);
+        f.niri_complete_animations();
+        set_time(f.niri(), Duration::ZERO);
+        let output = f.niri_output(1);
+        let owner = Rc::new(());
+        let win = f.niri().find_window_by_id(id).unwrap();
+        f.niri().layout.set_window_animation_targets(
+            &owner,
+            vec![AnimationTarget {
+                id: win,
+                output: output.clone(),
+                rect: Rectangle::new((500., 552.).into(), (40., 40.).into()),
+                edge: DockEdge::Bottom,
+                layer: None,
+            }],
+        );
+        for phase in ["minimize", "restore"] {
+            let base = if phase == "minimize" {
+                f.niri_state().minimize_window(Some(id));
+                0
+            } else {
+                assert!(f.niri_state().restore_window(Some(id), None, true));
+                (duration + 100) * 1000
+            };
+            let mut times: Vec<_> = (0..=duration + 100)
+                .step_by(10)
+                .map(|ms| ms * 1000)
+                .collect();
+            times.extend([duration * 250, duration * 500, duration * 750]);
+            times.sort_unstable();
+            times.dedup();
+            for us in times {
+                set_time(f.niri(), Duration::from_micros(base + us));
+                f.niri().advance_animations();
+                let frame = pixels(&mut f, &output, RenderTarget::Output);
+                if us % 10000 == 0 {
+                    save_frame(&format!("{name}-{phase}-{:04}", us / 10000), &frame);
+                }
+                for quarter in 1..=3 {
+                    if us == duration * 250 * quarter {
+                        save_frame(&format!("{name}-{phase}-quarter{quarter}"), &frame);
+                    }
+                }
+            }
+            assert!(elements(&mut f, &output).is_empty());
+        }
+    }
+}
+
+#[test]
+fn egl_effect_presets_use_elapsed_time_and_hand_back_to_live_window() {
+    for (effect, duration) in [("scale", 280_u64), ("genie", 550)] {
+        for scale in [1., 1.25] {
+            for edge in [
+                DockEdge::Left,
+                DockEdge::Right,
+                DockEdge::Top,
+                DockEdge::Bottom,
+            ] {
+                let mut f = setup_with_timing(&format!(
+                    "window-rule {{ open-floating true; }}\noutput \"headless-1\" {{ scale {scale}; }}"
+                ), effect, ""); // Deliberately no window-minimize block.
+                let client = f.add_client();
+                let (surface, id) = window(&mut f, client, [u32::MAX, 0, 0]);
+                f.niri_complete_animations();
+                set_time(f.niri(), Duration::ZERO);
+                let output = f.niri_output(1);
+                let size = output_size(&output);
+                let loc = match edge {
+                    DockEdge::Left => (8., size.h - 100.),
+                    DockEdge::Right => (size.w - 48., 100.),
+                    DockEdge::Top => (100., 8.),
+                    DockEdge::Bottom => (size.w - 150., size.h - 48.),
+                };
+                let owner = Rc::new(());
+                let win = f.niri().find_window_by_id(id).unwrap();
+                f.niri().layout.set_window_animation_targets(
+                    &owner,
+                    vec![AnimationTarget {
+                        id: win.clone(),
+                        output: output.clone(),
+                        rect: Rectangle::new(loc.into(), (40., 40.).into()),
+                        edge,
+                        layer: None,
+                    }],
+                );
+                assert!(f.niri_state().minimize_window(Some(id)));
+                let mut previous = pixels(&mut f, &output, RenderTarget::Output);
+                for quarter in 1..=3 {
+                    set_time(f.niri(), Duration::from_micros(duration * 250 * quarter));
+                    f.niri().advance_animations();
+                    assert_eq!(elements(&mut f, &output).len(), 1);
+                    let frame = pixels(&mut f, &output, RenderTarget::Output);
+                    assert_ne!(frame, previous, "{effect} {edge:?} at {quarter}/4 elapsed");
+                    previous = frame;
+                }
+                set_time(f.niri(), Duration::from_millis(duration - 1));
+                f.niri().advance_animations();
+                assert_eq!(elements(&mut f, &output).len(), 1);
+                set_time(f.niri(), Duration::from_millis(duration + 1));
+                f.niri().advance_animations();
+                assert!(elements(&mut f, &output).is_empty());
+                assert_eq!(red_pixels(&mut f, &output, RenderTarget::Output), 0);
+                assert!(f.niri_state().restore_window(Some(id), None, true));
+                // Change the real client after the restore snapshot: it must stay hidden
+                // until handoff, then the new buffer must replace the old snapshot.
+                let w = f.client(client).window(&surface);
+                let green = w
+                    .spbm
+                    .create_u32_rgba_buffer(0, u32::MAX, 0, u32::MAX, &w.qh, ());
+                w.surface.attach(Some(&green), 0, 0);
+                w.commit();
+                f.double_roundtrip(client);
+                let green_pixels = |frame: &[u8]| {
+                    frame
+                        .chunks_exact(4)
+                        .filter(|p| p[1] > 180 && p[0] < 80 && p[2] < 80)
+                        .count()
+                };
+                for quarter in 1..=3 {
+                    set_time(
+                        f.niri(),
+                        Duration::from_micros((duration + 1) * 1000 + duration * 250 * quarter),
+                    );
+                    f.niri().advance_animations();
+                    assert_eq!(elements(&mut f, &output).len(), 1);
+                    assert_eq!(
+                        green_pixels(&pixels(&mut f, &output, RenderTarget::Output)),
+                        0
+                    );
+                }
+                set_time(f.niri(), Duration::from_millis(2 * duration + 2));
+                f.niri().advance_animations();
+                assert!(elements(&mut f, &output).is_empty());
+                assert!(green_pixels(&pixels(&mut f, &output, RenderTarget::Output)) > 10000);
+                assert_eq!(f.niri().find_window_by_id(id).unwrap(), win);
+                // Rapid reversal and output reconfiguration must reveal the live tile.
+                assert!(f.niri_state().minimize_window(Some(id)));
+                assert!(f.niri_state().restore_window(Some(id), None, true));
+                assert_eq!(elements(&mut f, &output).len(), 1);
+                output.change_current_state(None, Some(Transform::_180), None, None);
+                f.niri().advance_animations();
+                assert!(elements(&mut f, &output).is_empty());
+                assert!(green_pixels(&pixels(&mut f, &output, RenderTarget::Output)) > 10000);
+            }
+        }
+    }
+}
+
+#[test]
+fn genie_preset_keeps_global_slowdown_and_off() {
+    use crate::animation::{Animation, Clock};
+    let config =
+        Config::parse_mem("animations { window-minimize-effect \"genie\"; slowdown 2.0; }\n")
+            .unwrap();
+    let mut clock = Clock::with_time(Duration::ZERO);
+    clock.set_rate(1. / config.animations.slowdown);
+    let anim = Animation::new(
+        clock.clone(),
+        0.,
+        1.,
+        0.,
+        config.animations.window_minimize().0,
+    );
+    for (ms, expected) in [(275, 0.25), (550, 0.5), (825, 0.75), (1100, 1.)] {
+        clock.set_unadjusted(Duration::from_millis(ms));
+        assert!((anim.clamped_value() - expected).abs() < 1e-6);
+    }
+    assert!(anim.is_done());
+    clock.set_complete_instantly(true);
+    let anim = Animation::new(
+        clock.clone(),
+        0.,
+        1.,
+        0.,
+        config.animations.window_minimize().0,
+    );
+    assert!(anim.is_done());
+}
+
+#[test]
+fn egl_genie_fallback_keeps_scale_opacity() {
+    let capture = |effect| {
+        let mut f = setup_with_timing(
+            "window-rule { open-floating true; }",
+            effect,
+            "window-minimize { duration-ms 550; curve \"linear\"; }",
+        );
+        let client = f.add_client();
+        let (_, id) = window(&mut f, client, [u32::MAX, 0, 0]);
+        f.niri_complete_animations();
+        set_time(f.niri(), Duration::ZERO);
+        let output = f.niri_output(1);
+        let owner = Rc::new(());
+        let win = f.niri().find_window_by_id(id).unwrap();
+        f.niri().layout.set_window_animation_targets(
+            &owner,
+            vec![AnimationTarget {
+                id: win,
+                output: output.clone(),
+                // Behind the floating window for a bottom-edge hint: Genie falls back.
+                rect: Rectangle::new((500., 8.).into(), (40., 40.).into()),
+                edge: DockEdge::Bottom,
+                layer: None,
+            }],
+        );
+        let mut frames = Vec::new();
+        for base in [0, 551] {
+            if base == 0 {
+                f.niri_state().minimize_window(Some(id));
+            } else {
+                assert!(f.niri_state().restore_window(Some(id), None, true));
+            }
+            for ms in [0, 10, 50, 275, 510, 549, 551] {
+                set_time(f.niri(), Duration::from_millis(base + ms));
+                f.niri().advance_animations();
+                frames.push(pixels(&mut f, &output, RenderTarget::Output));
+            }
+        }
+        frames
+    };
+    assert!(capture("genie") == capture("scale"));
 }

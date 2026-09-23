@@ -220,7 +220,16 @@ impl<I> MinimizeAnimation<I> {
             ((1. - p) / 0.15).min(1.)
         };
         if self.effect == MinimizeEffect::Genie {
-            if let Some(element) = self.render_genie(image, opacity as f32, p) {
+            // Keep the sheet opaque until it reaches the Dock. On restore, a very
+            // short fade avoids popping an opaque icon-sized snapshot into view.
+            let t = if self.restoring {
+                p / 0.04
+            } else {
+                (1. - p) / 0.06
+            }
+            .clamp(0., 1.);
+            let genie_opacity = t * t * (3. - 2. * t);
+            if let Some(element) = self.render_genie(image, genie_opacity as f32, p) {
                 return element.into();
             }
         }
@@ -427,7 +436,7 @@ impl<W: LayoutElement> Layout<W> {
             0.,
             1.,
             0.,
-            self.options.animations.window_minimize.0,
+            self.options.animations.window_minimize().0,
         );
         if anim.is_done() || snapshot.size.w <= 0. || snapshot.size.h <= 0. {
             return None;
