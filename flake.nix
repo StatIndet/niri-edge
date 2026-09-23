@@ -22,6 +22,7 @@
           seatd,
           libxkbcommon,
           libgbm,
+          mesa,
           pango,
           pipewire,
           pkg-config,
@@ -98,6 +99,8 @@
             ++ lib.optional withSystemd "systemd";
           buildNoDefaultFeatures = true;
 
+          checkInputs = [ mesa ];
+
           # ever since this commit:
           # https://github.com/niri-wm/niri/commit/771ea1e81557ffe7af9cbdbec161601575b64d81
           # niri now runs an actual instance of the real compositor (with a mock backend) during tests
@@ -105,6 +108,10 @@
           # this is fine for our build, we just need to make sure it has a directory to write to.
           preCheck = ''
             export XDG_RUNTIME_DIR="$(mktemp -d)"
+            # Capture protocol tests use surfaceless EGL without host GPU access.
+            export LIBGL_ALWAYS_SOFTWARE=true
+            export LIBGL_DRIVERS_PATH="${mesa}/lib/dri"
+            export __EGL_VENDOR_LIBRARY_FILENAMES="${mesa}/share/glvnd/egl_vendor.d/50_mesa.json"
           '';
 
           checkFlags = [
