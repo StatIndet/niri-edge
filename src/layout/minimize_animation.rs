@@ -285,6 +285,12 @@ impl<I> MinimizeAnimation<I> {
         area.size.w += 2. * padding.x;
         area.size.h += 2. * padding.y;
         area = area.intersection(Rectangle::from_size(self.output_size))?;
+        // Match the rasterized quad to the coordinates used by the inverse map.
+        // Fractional padding bounds otherwise resample the resting snapshot.
+        area = area
+            .to_physical_precise_up::<f64, i32>(self.output_scale)
+            .to_f64()
+            .to_logical(self.output_scale);
         let uniform_rect = |r: Rectangle<f64, Logical>| {
             [
                 r.loc.x as f32,

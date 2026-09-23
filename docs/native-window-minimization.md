@@ -149,9 +149,11 @@ animations {
 }
 ```
 
-Scale keeps a rectangular snapshot; Genie pulls the near edge toward the icon,
-then follows with the far edge while narrowing and bending individual sections
-of the image. Left, right, top, and bottom share one direction-normalized shader;
+Scale keeps a rectangular snapshot. Genie forms a cubic Bezier funnel between
+the window and its Dock icon. Once the leading edge arrives, the neck stays
+fixed in output coordinates while the image flows through it; rows crossing the
+intake disappear instead of all compressing into an icon-sized rectangle.
+Left, right, top, and bottom share one direction-normalized shader;
 restoration traverses the same shape in reverse. Shadows, borders, and the
 snapshot's orientation travel with the sheet. A missing shader or an unusual
 hint behind the source window falls back to Scale. Changing the setting affects
@@ -160,6 +162,23 @@ new operations; an active operation keeps its selected effect.
 Genie fades out with `1 - smoothstep(0.94, 1.0, progress)` and fades in with
 `smoothstep(0.0, 0.04, progress)` (33 ms and 22 ms at the linear 550 ms preset).
 Scale, including Genie's rendering fallback, retains its original 15% fades.
+The side rails finish gathering at 40% progress; the leading edge reaches the
+intake at 55%, and the trailing edge begins moving at 38%. These overlapping
+phases keep the body broad until the neck forms. Direction transforms are shared
+by all four Dock edges.
+The intake starts outside the full snapshot when a window overlaps the Dock,
+preserving its first frame, including border and shadow padding.
+
+The Bezier side-rail control points are adapted from
+[GenieWarpMesh](https://github.com/usagimaru/GenieWarpMesh/blob/5a6f2a4460dde2c487b0ac4138aa479732ee8d90/Sources/GenieWarpMesh/GenieEffect.swift)
+(MIT; notice in `src/render_helpers/shaders/genie.LICENSE`). The implementation
+also draws on the fixed-funnel approach of
+[macos-genie](https://github.com/SekiroKenjii/macos-genie/blob/375f785b74b7903e48923e88b250e10cd813fd13/genie.js)
+and the content absorption behavior of
+[KWin Magic Lamp](https://github.com/KDE/kwin/blob/a5a83437d09024c802eb6db738cfd9cbfd97e41c/src/plugins/magiclamp/magiclamp.cpp).
+Niri uses an inverse fragment mapping, without importing their platform-specific
+window management, mesh/strip actors, or private macOS APIs. This is an
+approximation, not Apple's implementation or an assertion of pixel parity.
 
 A shell checks `window_minimization_animation` separately from basic minimization,
 and checks `window_minimization_effects` before offering effect selection. An
@@ -258,6 +277,10 @@ sampled every 10 ms and must play at 100 fps; quarter-time stills are separate.
 For a continuous minimize/restore video, omit the final minimize hold frame,
 which shares its timestamp with restore frame zero. A/B here vary timing only;
 both use the opacity implementation in the tested build.
+`egl_export_genie_funnel_sequence` additionally exports a larger patterned
+window with the same sampling interval. The stationary-neck test checks that
+the outline stays fixed while leading content is absorbed before trailing
+content, in all four directions.
 
 Contract tests cover CLI and KDL parsing, IPC wire formats, compatibility with
 older window snapshots, and equivalence between incremental window events and

@@ -946,3 +946,229 @@ fn egl_genie_fallback_keeps_scale_opacity() {
     };
     assert!(capture("genie") == capture("scale"));
 }
+
+#[test]
+fn egl_genie_feeds_content_through_a_stationary_neck() {
+    for edge in [
+        DockEdge::Bottom,
+        DockEdge::Top,
+        DockEdge::Right,
+        DockEdge::Left,
+    ] {
+        let mut f = setup_with_timing("window-rule { open-floating true; }", "genie", "");
+        let client = f.add_client();
+        let (surface, id) = window(&mut f, client, [u32::MAX, 0, 0]);
+        let (far, near, target, mouth, section) = match edge {
+            DockEdge::Bottom => ((110, 20), (110, 140), (500., 552.), 572., 532),
+            DockEdge::Top => ((110, 140), (110, 20), (120., 8.), -28., -68),
+            DockEdge::Right => ((20, 80), (200, 80), (752., 120.), 772., 732),
+            DockEdge::Left => ((200, 80), (20, 80), (8., 440.), -28., -68),
+        };
+        stamp(&mut f, client, &surface, far.0, far.1, [u32::MAX; 3]);
+        stamp(&mut f, client, &surface, near.0, near.1, [0, 0, u32::MAX]);
+        f.niri_complete_animations();
+        set_time(f.niri(), Duration::ZERO);
+        let output = f.niri_output(1);
+        let owner = Rc::new(());
+        let win = f.niri().find_window_by_id(id).unwrap();
+        f.niri().layout.set_window_animation_targets(
+            &owner,
+            vec![AnimationTarget {
+                id: win,
+                output: output.clone(),
+                rect: Rectangle::new(target.into(), (40., 40.).into()),
+                edge,
+                layer: None,
+            }],
+        );
+        f.niri_state().minimize_window(Some(id));
+        let axis = |i: usize| match edge {
+            DockEdge::Bottom => (i / 800) as i32,
+            DockEdge::Top => -(i as i32 / 800),
+            DockEdge::Right => (i % 800) as i32,
+            DockEdge::Left => -(i as i32 % 800),
+        };
+        let mut neck = None;
+        for ms in [330, 385, 440] {
+            // 60%, 70%, 80% of the real default duration.
+            set_time(f.niri(), Duration::from_millis(ms));
+            f.niri().advance_animations();
+            let frame = pixels(&mut f, &output, RenderTarget::Output);
+            let colored = |p: &[u8]| p[0] > 180 || p[2] > 180;
+            assert!(frame
+                .chunks_exact(4)
+                .enumerate()
+                .all(|(i, p)| !colored(p) || f64::from(axis(i)) <= mouth + 1.));
+            if ms < 440 {
+                let slice: Vec<_> = frame
+                    .chunks_exact(4)
+                    .enumerate()
+                    .filter(|(i, _)| axis(*i) == section)
+                    .map(|(_, p)| colored(p))
+                    .collect();
+                assert!(slice.iter().any(|v| *v));
+                let bounds = (
+                    slice.iter().position(|v| *v),
+                    slice.iter().rposition(|v| *v),
+                );
+                if let Some(previous) = neck {
+                    assert_eq!(bounds, previous, "moving neck: {edge:?}");
+                } else {
+                    neck = Some(bounds);
+                }
+            } else {
+                assert!(
+                    frame
+                        .chunks_exact(4)
+                        .any(|p| p[0] > 220 && p[1] > 220 && p[2] > 220),
+                    "trailing content lost: {edge:?}"
+                );
+                assert!(
+                    !frame
+                        .chunks_exact(4)
+                        .any(|p| p[2] > 180 && p[0] < 80 && p[1] < 80),
+                    "leading content not absorbed: {edge:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Larger, patterned real client buffers make the funnel and content flow visible.
+#[test]
+#[ignore = "set NIRI_TEST_ANIMATION_FRAMES to export a large-window sequence"]
+fn egl_export_genie_funnel_sequence() {
+    assert!(std::env::var_os("NIRI_TEST_ANIMATION_FRAMES").is_some());
+    let mut f = setup_with_timing("window-rule { open-floating true; }", "genie", "");
+    let client = f.add_client();
+    let (surface, id) = window(&mut f, client, [0x20202020, 0x70707070, 0xd0d0d0d0]);
+    let w = f.client(client).window(&surface);
+    w.set_size(560, 380);
+    w.ack_last_and_commit();
+    f.double_roundtrip(client);
+    for y in (20..360).step_by(40) {
+        for x in (20..540).step_by(40) {
+            stamp(
+                &mut f,
+                client,
+                &surface,
+                x,
+                y,
+                if y < 60 {
+                    [u32::MAX; 3]
+                } else if x < 100 {
+                    [0x99999999, 0xcccccccc, u32::MAX]
+                } else {
+                    [0xdddddddd, 0xeeeeeeee, u32::MAX]
+                },
+            );
+        }
+    }
+    f.niri_complete_animations();
+    set_time(f.niri(), Duration::ZERO);
+    let output = f.niri_output(1);
+    let owner = Rc::new(());
+    let win = f.niri().find_window_by_id(id).unwrap();
+    f.niri().layout.move_floating_window(
+        Some(&win),
+        niri_ipc::PositionChange::SetFixed(120.),
+        niri_ipc::PositionChange::SetFixed(100.),
+        false,
+    );
+    assert_eq!(
+        tile_rect(&mut f, id),
+        Rectangle::new((120., 100.).into(), (560., 380.).into())
+    );
+    f.niri().layout.set_window_animation_targets(
+        &owner,
+        vec![AnimationTarget {
+            id: win,
+            output: output.clone(),
+            rect: Rectangle::new((380., 552.).into(), (40., 40.).into()),
+            edge: DockEdge::Bottom,
+            layer: None,
+        }],
+    );
+    for phase in ["minimize", "restore"] {
+        let base = if phase == "minimize" {
+            f.niri_state().minimize_window(Some(id));
+            0
+        } else {
+            assert!(f.niri_state().restore_window(Some(id), None, true));
+            650
+        };
+        for ms in (0..=650).step_by(10) {
+            set_time(f.niri(), Duration::from_millis(base + ms));
+            f.niri().advance_animations();
+            save_frame(
+                &format!("large-{phase}-{:04}", ms / 10),
+                &pixels(&mut f, &output, RenderTarget::Output),
+            );
+        }
+        assert!(elements(&mut f, &output).is_empty());
+    }
+}
+
+#[test]
+fn egl_genie_first_frame_preserves_texture_padding_when_overlapping_dock() {
+    for edge in [
+        DockEdge::Bottom,
+        DockEdge::Top,
+        DockEdge::Right,
+        DockEdge::Left,
+    ] {
+        let mut f = setup_with_timing("window-rule { open-floating true; }", "genie", "");
+        let client = f.add_client();
+        let (surface, id) = window(&mut f, client, [u32::MAX, 0, 0]);
+        let w = f.client(client).window(&surface);
+        w.set_size(760, 560);
+        w.xdg_surface.set_window_geometry(0, 0, 760, 560);
+        w.ack_last_and_commit();
+        f.double_roundtrip(client);
+        // Subsurfaces extend beyond the main geometry, just as snapshot padding can.
+        stamp(&mut f, client, &surface, -12, -12, [u32::MAX; 3]);
+        stamp(&mut f, client, &surface, 752, 552, [u32::MAX; 3]);
+        let win = f.niri().find_window_by_id(id).unwrap();
+        f.niri().layout.move_floating_window(
+            Some(&win),
+            niri_ipc::PositionChange::SetFixed(20.),
+            niri_ipc::PositionChange::SetFixed(20.),
+            false,
+        );
+        f.niri_complete_animations();
+        set_time(f.niri(), Duration::ZERO);
+        let output = f.niri_output(1);
+        let target = match edge {
+            DockEdge::Bottom => (380., 552.),
+            DockEdge::Top => (380., 8.),
+            DockEdge::Right => (752., 240.),
+            DockEdge::Left => (8., 240.),
+        };
+        let owner = Rc::new(());
+        f.niri().layout.set_window_animation_targets(
+            &owner,
+            vec![AnimationTarget {
+                id: win,
+                output: output.clone(),
+                rect: Rectangle::new(target.into(), (40., 40.).into()),
+                edge,
+                layer: None,
+            }],
+        );
+        let before = pixels(&mut f, &output, RenderTarget::Output);
+        let white = |p: &[u8]| p[0] > 220 && p[1] > 220 && p[2] > 220;
+        assert!(white(&before[(10 * 800 + 10) * 4..][..4]));
+        assert!(white(&before[(590 * 800 + 790) * 4..][..4]));
+        f.niri_state().minimize_window(Some(id));
+        let first = pixels(&mut f, &output, RenderTarget::Output);
+        save_frame(&format!("overlap-{edge:?}-before"), &before);
+        save_frame(&format!("overlap-{edge:?}-first"), &first);
+        assert!(
+            before
+                .chunks_exact(4)
+                .map(|p| (is_red(p), white(p)))
+                .eq(first.chunks_exact(4).map(|p| (is_red(p), white(p)))),
+            "{edge:?}"
+        );
+    }
+}
