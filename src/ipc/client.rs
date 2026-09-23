@@ -176,6 +176,14 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
                         "no"
                     }
                 );
+                println!(
+                    "Window minimization animation: {}",
+                    if capabilities.window_minimization_animation {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                );
             }
         }
         Msg::Outputs => {

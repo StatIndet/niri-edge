@@ -1575,6 +1575,18 @@ mod tests {
                     },
                     custom_shader: None,
                 },
+                window_minimize: WindowMinimizeAnim(
+                    Animation {
+                        off: false,
+                        kind: Easing(
+                            EasingParams {
+                                duration_ms: 280,
+                                curve: EaseOutCubic,
+                            },
+                        ),
+                    },
+                ),
+                window_minimize_effect: Scale,
                 horizontal_view_movement: HorizontalViewMovementAnim(
                     Animation {
                         off: false,

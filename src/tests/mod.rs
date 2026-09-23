@@ -9,6 +9,7 @@ mod floating;
 mod fullscreen;
 mod layer_shell;
 mod minimize;
+mod minimize_animation;
 mod minimize_capture;
 mod minimize_ipc;
 mod remove_output;

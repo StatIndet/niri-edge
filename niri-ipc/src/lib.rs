@@ -69,6 +69,12 @@ pub enum Request {
     Version,
     /// Request supported fork extensions without changing compositor state.
     Capabilities,
+    /// Replace this connection's window animation targets. An empty list clears them.
+    /// Targets expire when this IPC connection closes; coordinates are output-local logical units.
+    SetWindowAnimationTargets {
+        /// Complete replacement for the hints owned by this connection (at most 1024).
+        targets: Vec<WindowAnimationTarget>,
+    },
     /// Request information about connected outputs.
     Outputs,
     /// Request information about workspaces.
@@ -177,6 +183,45 @@ pub enum Response {
 pub struct Capabilities {
     /// Native window minimization, restoration, and [`Window::is_minimized`].
     pub window_minimization: bool,
+    /// Shared minimize/restore scale animation and connection-owned target hints.
+    #[serde(default)]
+    pub window_minimization_animation: bool,
+    /// Supported values for `animations { window-minimize-effect "..."; }`.
+    #[serde(default)]
+    pub window_minimization_effects: Vec<String>,
+}
+
+/// Dock edge in the output's logical coordinate system, after output transform.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum DockEdge {
+    /// Left edge.
+    Left,
+    /// Right edge.
+    Right,
+    /// Top edge.
+    Top,
+    /// Bottom edge.
+    Bottom,
+}
+
+/// A window's visual representation on one output. Never matched by title or app ID.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct WindowAnimationTarget {
+    /// Live compositor window ID.
+    pub id: u64,
+    /// Output connector name.
+    pub output: String,
+    /// Logical rectangle: x, y, width, height. All values must be finite; sizes must be positive.
+    pub rect: [f64; 4],
+    /// Optional uniquely named layer surface on this output. If present, the rectangle is
+    /// surface-local and niri converts it using the compositor's actual layer placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_namespace: Option<String>,
+    /// Dock edge, used for directional fallbacks.
+    pub edge: DockEdge,
 }
 
 /// Overview information.
@@ -2215,6 +2260,9 @@ mod tests {
 
     #[test]
     fn minimization_request_wire_format() {
+        let legacy: Capabilities =
+            serde_json::from_value(serde_json::json!({"window_minimization": true})).unwrap();
+        assert!(!legacy.window_minimization_animation);
         for (request, wire) in [
             (Request::Capabilities, serde_json::json!("Capabilities")),
             (
@@ -2235,10 +2283,12 @@ mod tests {
         }
         let response = Response::Capabilities(Capabilities {
             window_minimization: true,
+            window_minimization_animation: true,
+            window_minimization_effects: vec!["scale".into(), "genie".into()],
         });
         assert_eq!(
             serde_json::to_value(response).unwrap(),
-            serde_json::json!({"Capabilities": {"window_minimization": true}})
+            serde_json::json!({"Capabilities": {"window_minimization": true, "window_minimization_animation": true, "window_minimization_effects": ["scale", "genie"]}})
         );
     }
 
