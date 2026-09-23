@@ -106,6 +106,8 @@ pub enum Msg {
     EventStream,
     /// Print the version of the running niri instance.
     Version,
+    /// List supported fork extensions without changing compositor state.
+    Capabilities,
     /// Request an error from the running niri instance.
     RequestError,
     /// Print the overview state.

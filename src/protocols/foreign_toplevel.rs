@@ -48,6 +48,8 @@ pub trait ForeignToplevelHandler {
     fn foreign_toplevel_manager_state(&mut self) -> &mut ForeignToplevelManagerState;
     fn activate(&mut self, wl_surface: WlSurface);
     fn close(&mut self, wl_surface: WlSurface);
+    fn set_minimized(&mut self, wl_surface: WlSurface);
+    fn unset_minimized(&mut self, wl_surface: WlSurface);
     fn set_fullscreen(&mut self, wl_surface: WlSurface, wl_output: Option<WlOutput>);
     fn unset_fullscreen(&mut self, wl_surface: WlSurface);
     fn set_maximized(&mut self, wl_surface: WlSurface);
@@ -58,7 +60,7 @@ struct ToplevelData {
     identifier: MappedId,
     title: Option<String>,
     app_id: Option<String>,
-    states: ArrayVec<u32, 3>,
+    states: ArrayVec<u32, 4>,
     output: Option<Output>,
 
     ext_list_instances: HashSet<ExtForeignToplevelHandleV1>,
@@ -110,7 +112,12 @@ pub fn refresh(state: &mut State) {
 
     // Handle closed windows.
     protocol_state.toplevels.retain(|surface, data| {
-        if state.niri.layout.find_window_and_output(surface).is_some() {
+        if state
+            .niri
+            .layout
+            .find_managed_window_and_output(surface)
+            .is_some()
+        {
             return true;
         }
 
@@ -130,30 +137,35 @@ pub fn refresh(state: &mut State) {
     // Save the focused window for last, this way when the focus changes, we will first deactivate
     // the previous window and only then activate the newly focused window.
     let mut focused = None;
-    state.niri.layout.with_windows(|mapped, output, _, _| {
-        let toplevel = mapped.toplevel();
-        let wl_surface = toplevel.wl_surface();
-        with_toplevel_role_and_current(toplevel, |role, cur| {
-            let Some(cur) = cur else {
-                error!("mapped must have had initial commit");
-                return;
-            };
+    state
+        .niri
+        .layout
+        .with_managed_windows(|mapped, output, _, _| {
+            let toplevel = mapped.toplevel();
+            let wl_surface = toplevel.wl_surface();
+            with_toplevel_role_and_current(toplevel, |role, cur| {
+                let Some(cur) = cur else {
+                    error!("mapped must have had initial commit");
+                    return;
+                };
 
-            if state.niri.keyboard_focus.surface() == Some(wl_surface) {
-                focused = Some((mapped.id(), mapped.window.clone(), output.cloned()));
-            } else {
-                refresh_toplevel(
-                    protocol_state,
-                    wl_surface,
-                    mapped.id(),
-                    role,
-                    cur,
-                    output,
-                    false,
-                );
-            }
+                if !mapped.is_minimized() && state.niri.keyboard_focus.surface() == Some(wl_surface)
+                {
+                    focused = Some((mapped.id(), mapped.window.clone(), output.cloned()));
+                } else {
+                    refresh_toplevel(
+                        protocol_state,
+                        wl_surface,
+                        mapped.id(),
+                        role,
+                        cur,
+                        output,
+                        false,
+                        mapped.is_minimized(),
+                    );
+                }
+            });
         });
-    });
 
     // Finally, refresh the focused window.
     if let Some((identifier, window, output)) = focused {
@@ -173,6 +185,7 @@ pub fn refresh(state: &mut State) {
                 cur,
                 output.as_ref(),
                 true,
+                false,
             );
         });
     }
@@ -203,6 +216,7 @@ pub fn on_output_bound(state: &mut State, output: &Output, wl_output: &WlOutput)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn refresh_toplevel(
     protocol_state: &mut ForeignToplevelManagerState,
     wl_surface: &WlSurface,
@@ -211,8 +225,9 @@ fn refresh_toplevel(
     current: &ToplevelState,
     output: Option<&Output>,
     has_focus: bool,
+    is_minimized: bool,
 ) {
-    let states = to_state_vec(&current.states, has_focus);
+    let states = to_state_vec(&current.states, has_focus, is_minimized);
 
     match protocol_state.toplevels.entry(wl_surface.clone()) {
         Entry::Occupied(entry) => {
@@ -654,8 +669,10 @@ where
             zwlr_foreign_toplevel_handle_v1::Request::UnsetMaximized => {
                 state.unset_maximized(surface)
             }
-            zwlr_foreign_toplevel_handle_v1::Request::SetMinimized => (),
-            zwlr_foreign_toplevel_handle_v1::Request::UnsetMinimized => (),
+            zwlr_foreign_toplevel_handle_v1::Request::SetMinimized => state.set_minimized(surface),
+            zwlr_foreign_toplevel_handle_v1::Request::UnsetMinimized => {
+                state.unset_minimized(surface)
+            }
             zwlr_foreign_toplevel_handle_v1::Request::Activate { .. } => {
                 state.activate(surface);
             }
@@ -682,7 +699,11 @@ where
     }
 }
 
-fn to_state_vec(states: &ToplevelStateSet, has_focus: bool) -> ArrayVec<u32, 3> {
+fn to_state_vec(
+    states: &ToplevelStateSet,
+    has_focus: bool,
+    is_minimized: bool,
+) -> ArrayVec<u32, 4> {
     let mut rv = ArrayVec::new();
     if states.contains(xdg_toplevel::State::Maximized) {
         rv.push(zwlr_foreign_toplevel_handle_v1::State::Maximized as u32);
@@ -699,7 +720,10 @@ fn to_state_vec(states: &ToplevelStateSet, has_focus: bool) -> ArrayVec<u32, 3> 
     // focus, i.e. they don't expect multiple windows to have it set at once. Even Waybar which
     // handles multiple activated windows correctly uses it in its design in such a way that
     // keyboard focus would make more sense. Let's do what the clients expect.
-    if has_focus {
+    if is_minimized {
+        rv.push(zwlr_foreign_toplevel_handle_v1::State::Minimized as u32);
+    }
+    if has_focus && !is_minimized {
         rv.push(zwlr_foreign_toplevel_handle_v1::State::Activated as u32);
     }
 

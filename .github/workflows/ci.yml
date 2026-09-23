@@ -41,6 +41,14 @@ jobs:
       - name: Test
         run: cargo test --all --exclude niri-visual-tests -- --nocapture
 
+      - name: Build CLI for client-server smoke test
+        run: cargo build
+
+      - name: Test CLI against isolated Wayland server
+        env:
+          NIRI_TEST_BINARY: ${{ github.workspace }}/target/debug/niri
+        run: cargo test --lib tests::minimize_ipc::built_cli_minimize_restore_close -- --ignored --exact
+
   build:
     strategy:
       fail-fast: false

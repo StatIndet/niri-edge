@@ -151,6 +151,11 @@ pub enum Action {
     CloseWindow,
     #[knuffel(skip)]
     CloseWindowById(u64),
+    MinimizeWindow(#[knuffel(property(name = "id"))] Option<u64>),
+    RestoreWindow(
+        #[knuffel(property(name = "id"))] Option<u64>,
+        #[knuffel(property(name = "output"))] Option<String>,
+    ),
     FullscreenWindow,
     #[knuffel(skip)]
     FullscreenWindowById(u64),
@@ -434,6 +439,8 @@ impl From<niri_ipc::Action> for Action {
             }
             niri_ipc::Action::CloseWindow { id: None } => Self::CloseWindow,
             niri_ipc::Action::CloseWindow { id: Some(id) } => Self::CloseWindowById(id),
+            niri_ipc::Action::MinimizeWindow { id } => Self::MinimizeWindow(id),
+            niri_ipc::Action::RestoreWindow { id, output } => Self::RestoreWindow(id, output),
             niri_ipc::Action::FullscreenWindow { id: None } => Self::FullscreenWindow,
             niri_ipc::Action::FullscreenWindow { id: Some(id) } => Self::FullscreenWindowById(id),
             niri_ipc::Action::ToggleWindowedFullscreen { id: None } => {
@@ -1051,6 +1058,42 @@ impl FromStr for Key {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_minimize_and_restore_actions() {
+        let actions: Vec<Action> = knuffel::parse(
+            "actions.kdl",
+            r#"
+                minimize-window
+                minimize-window id=42
+                restore-window
+                restore-window id=42 output="DP-1"
+                restore-window output="HDMI-A-1"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                Action::MinimizeWindow(None),
+                Action::MinimizeWindow(Some(42)),
+                Action::RestoreWindow(None, None),
+                Action::RestoreWindow(Some(42), Some("DP-1".into())),
+                Action::RestoreWindow(None, Some("HDMI-A-1".into())),
+            ]
+        );
+        assert_eq!(
+            Action::from(niri_ipc::Action::MinimizeWindow { id: Some(42) }),
+            actions[1]
+        );
+        assert_eq!(
+            Action::from(niri_ipc::Action::RestoreWindow {
+                id: Some(42),
+                output: Some("DP-1".into()),
+            }),
+            actions[3]
+        );
+    }
 
     #[test]
     fn parse_xf86_screensaver() {

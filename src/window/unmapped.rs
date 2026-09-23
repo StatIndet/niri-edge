@@ -12,6 +12,8 @@ pub struct Unmapped {
     pub state: InitialConfigureState,
     /// Activation token, if one was used on this unmapped window.
     pub activation_token_data: Option<XdgActivationTokenData>,
+    /// A minimize request received before the first buffer was committed.
+    pub wants_minimized: bool,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -87,6 +89,7 @@ impl Unmapped {
                 wants_maximized: false,
             },
             activation_token_data: None,
+            wants_minimized: false,
         }
     }
 

@@ -91,6 +91,9 @@ pub struct Mapped {
     /// Whether this window has the keyboard focus.
     is_focused: bool,
 
+    /// Whether the layout currently owns this window in its minimized collection.
+    is_minimized: bool,
+
     /// Whether this window is the active window in its column.
     is_active_in_column: bool,
 
@@ -287,6 +290,7 @@ impl Mapped {
             offscreen_data: RefCell::new(None),
             is_urgent: false,
             is_focused: false,
+            is_minimized: false,
             is_active_in_column: true,
             is_floating: false,
             is_window_cast_target: false,
@@ -369,6 +373,10 @@ impl Mapped {
 
     pub fn is_focused(&self) -> bool {
         self.is_focused
+    }
+
+    pub fn is_minimized(&self) -> bool {
+        self.is_minimized
     }
 
     pub fn is_active_in_column(&self) -> bool {
@@ -976,6 +984,13 @@ impl LayoutElement for Mapped {
 
     fn is_urgent(&self) -> bool {
         self.is_urgent
+    }
+
+    fn set_minimized(&mut self, minimized: bool) {
+        self.is_minimized = minimized;
+        if minimized {
+            self.set_is_focused(false);
+        }
     }
 
     fn set_activated(&mut self, active: bool) {

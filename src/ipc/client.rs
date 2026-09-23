@@ -31,6 +31,7 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
 
     let request = match &msg {
         Msg::Version => Request::Version,
+        Msg::Capabilities => Request::Capabilities,
         Msg::Outputs => Request::Outputs,
         Msg::FocusedWindow => Request::FocusedWindow,
         Msg::FocusedOutput => Request::FocusedOutput,
@@ -156,6 +157,26 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
 
             println!("Compositor version: {compositor_version}");
             println!("CLI version:        {cli_version}");
+        }
+        Msg::Capabilities => {
+            let Response::Capabilities(capabilities) = response else {
+                bail!("unexpected response: expected Capabilities, got {response:?}");
+            };
+
+            if json {
+                let capabilities =
+                    serde_json::to_string(&capabilities).context("error formatting response")?;
+                println!("{capabilities}");
+            } else {
+                println!(
+                    "Native window minimization: {}",
+                    if capabilities.window_minimization {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                );
+            }
         }
         Msg::Outputs => {
             let Response::Outputs(outputs) = response else {
@@ -723,6 +744,10 @@ fn print_window(window: &Window) {
     println!(
         "  Is floating: {}",
         if window.is_floating { "yes" } else { "no" }
+    );
+    println!(
+        "  Is minimized: {}",
+        if window.is_minimized { "yes" } else { "no" }
     );
 
     if let Some(pid) = window.pid {

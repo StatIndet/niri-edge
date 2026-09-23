@@ -61,6 +61,19 @@ impl XdgShellHandler for State {
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
         let popup = PopupKind::Xdg(surface);
+        if let Ok(root) = find_popup_root_surface(&popup) {
+            if self
+                .niri
+                .layout
+                .find_managed_window_and_output(&root)
+                .is_some_and(|(mapped, _)| mapped.is_minimized())
+            {
+                if let PopupKind::Xdg(surface) = &popup {
+                    surface.send_popup_done();
+                }
+                return;
+            }
+        }
         self.unconstrain_popup(&popup);
 
         if let Err(err) = self.niri.popups.track_popup(popup) {
@@ -463,11 +476,23 @@ impl XdgShellHandler for State {
         });
     }
 
+    fn minimize_request(&mut self, toplevel: ToplevelSurface) {
+        if let Some((mapped, _)) = self
+            .niri
+            .layout
+            .find_managed_window_and_output(toplevel.wl_surface())
+        {
+            self.minimize_window(Some(mapped.id()));
+        } else if let Some(unmapped) = self.niri.unmapped_windows.get_mut(toplevel.wl_surface()) {
+            unmapped.wants_minimized = true;
+        }
+    }
+
     fn maximize_request(&mut self, toplevel: ToplevelSurface) {
         if let Some((mapped, _)) = self
             .niri
             .layout
-            .find_window_and_output_mut(toplevel.wl_surface())
+            .find_managed_window_and_output_mut(toplevel.wl_surface())
         {
             // A configure is required in response to this event regardless if there are pending
             // changes.
@@ -549,7 +574,7 @@ impl XdgShellHandler for State {
         if let Some((mapped, _)) = self
             .niri
             .layout
-            .find_window_and_output_mut(toplevel.wl_surface())
+            .find_managed_window_and_output_mut(toplevel.wl_surface())
         {
             // A configure is required in response to this event regardless if there are pending
             // changes.
@@ -674,16 +699,17 @@ impl XdgShellHandler for State {
         if let Some((mapped, current_output)) = self
             .niri
             .layout
-            .find_window_and_output_mut(toplevel.wl_surface())
+            .find_managed_window_and_output_mut(toplevel.wl_surface())
         {
             // A configure is required in response to this event regardless if there are pending
             // changes.
             mapped.set_needs_configure();
 
             let window = mapped.window.clone();
+            let is_minimized = mapped.is_minimized();
 
             if let Some(requested_output) = requested_output {
-                if Some(&requested_output) != current_output {
+                if !is_minimized && Some(&requested_output) != current_output {
                     self.niri.layout.move_to_output(
                         Some(&window),
                         &requested_output,
@@ -760,7 +786,7 @@ impl XdgShellHandler for State {
         if let Some((mapped, _)) = self
             .niri
             .layout
-            .find_window_and_output_mut(toplevel.wl_surface())
+            .find_managed_window_and_output_mut(toplevel.wl_surface())
         {
             // A configure is required in response to this event regardless if there are pending
             // changes.
@@ -888,7 +914,7 @@ impl XdgShellHandler for State {
         let win_out = self
             .niri
             .layout
-            .find_window_and_output(surface.wl_surface());
+            .find_managed_window_and_output(surface.wl_surface());
 
         let Some((mapped, output)) = win_out else {
             // I have no idea how this can happen, but I saw it happen once, in a weird interaction
@@ -1001,7 +1027,8 @@ impl XdgDecorationHandler for State {
         if toplevel.is_initial_configure_sent() {
             // If this is a mapped window, flag it as needs configure to avoid duplicate configures.
             let surface = toplevel.wl_surface();
-            if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(surface) {
+            if let Some((mapped, _)) = self.niri.layout.find_managed_window_and_output_mut(surface)
+            {
                 mapped.set_needs_configure();
             } else {
                 toplevel.send_configure();
@@ -1020,7 +1047,8 @@ impl XdgDecorationHandler for State {
         if toplevel.is_initial_configure_sent() {
             // If this is a mapped window, flag it as needs configure to avoid duplicate configures.
             let surface = toplevel.wl_surface();
-            if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(surface) {
+            if let Some((mapped, _)) = self.niri.layout.find_managed_window_and_output_mut(surface)
+            {
                 mapped.set_needs_configure();
             } else {
                 toplevel.send_configure();
@@ -1432,7 +1460,7 @@ impl State {
         } else if let Some((mapped, output)) = self
             .niri
             .layout
-            .find_window_and_output_mut(toplevel.wl_surface())
+            .find_managed_window_and_output_mut(toplevel.wl_surface())
         {
             if mapped.recompute_window_rules(window_rules, self.niri.is_at_startup) {
                 drop(config);
@@ -1495,7 +1523,11 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
         let span =
             trace_span!("toplevel pre-commit", surface = %surface.id(), serial = Empty).entered();
 
-        let Some((mapped, output)) = state.niri.layout.find_window_and_output_mut(surface) else {
+        let Some((mapped, output)) = state
+            .niri
+            .layout
+            .find_managed_window_and_output_mut(surface)
+        else {
             error!("pre-commit hook for mapped surfaces must be removed upon unmapping");
             return;
         };
@@ -1596,6 +1628,9 @@ pub fn add_mapped_toplevel_pre_commit_hook(toplevel: &ToplevelSurface) -> HookId
         }
 
         let window = mapped.window.clone();
+        if mapped.is_minimized() {
+            return;
+        }
         if got_unmapped {
             let output = output.cloned();
             state.store_unmap_snapshot(&window, output.as_ref());
