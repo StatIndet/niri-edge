@@ -72,6 +72,10 @@ impl TouchOverviewGrab {
         }
     }
 
+    pub fn window(&self) -> Option<&Window> {
+        self.window.as_ref()
+    }
+
     fn on_frame(&mut self, data: &mut State) -> bool {
         let Some(timestamp) = self.event_timestamp.take() else {
             return true;

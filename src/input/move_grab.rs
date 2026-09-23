@@ -71,6 +71,10 @@ impl MoveGrab {
         })
     }
 
+    pub fn window(&self) -> &Window {
+        &self.window
+    }
+
     pub fn is_move(&self) -> bool {
         self.gesture == GestureState::Move
     }

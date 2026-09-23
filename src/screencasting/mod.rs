@@ -471,7 +471,7 @@ impl State {
 impl Niri {
     pub fn refresh_mapped_cast_window_rules(&mut self) {
         // O(N^2) but should be fine since there aren't many casts usually.
-        self.layout.with_windows_mut(|mapped, _| {
+        self.layout.with_managed_windows_mut(|mapped, _| {
             let id = mapped.id().get();
             // Find regardless of cast.is_active.
             let value = self
@@ -503,6 +503,8 @@ impl Niri {
                 }
                 Entry::Vacant(entry) => {
                     entry.insert(output.clone());
+                    // Restored windows have no cached output, but may still have a live cast.
+                    output_changed.push((mapped.id(), output.clone()));
                 }
             }
         });

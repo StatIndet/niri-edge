@@ -537,7 +537,7 @@ impl<W: LayoutElement> Workspace<W> {
         self.set_view_size(scale, transform, view_size, working_area);
     }
 
-    fn set_view_size(
+    pub(super) fn set_view_size(
         &mut self,
         scale: smithay::output::Scale,
         transform: Transform,
@@ -750,6 +750,88 @@ impl<W: LayoutElement> Workspace<W> {
                 self.floating_is_active = FloatingActive::Yes;
             }
         }
+    }
+
+    pub(super) fn is_pending_maximized(&self, id: &W::Id) -> bool {
+        self.scrolling
+            .columns()
+            .find(|column| column.contains(id))
+            .is_some_and(|column| column.is_pending_maximized())
+    }
+
+    pub(super) fn minimized_floating_center(&self, id: &W::Id) -> Option<Point<f64, SizeFrac>> {
+        let tile = self.tiles().find(|tile| tile.window().id() == id)?;
+        if !self.is_floating(id) && !tile.restore_to_floating {
+            return None;
+        }
+        let size = if self.is_floating(id) {
+            tile.window()
+                .expected_size()
+                .unwrap_or_else(|| tile.window().size())
+        } else {
+            tile.floating_window_size
+                .unwrap_or_else(|| tile.window().size())
+        };
+        let size = Size::from((
+            tile.tile_width_for_window_width(f64::from(size.w)),
+            tile.tile_height_for_window_height(f64::from(size.h)),
+        ));
+        let pos = self
+            .floating
+            .tiles_with_offsets()
+            .find(|(tile, _)| tile.window().id() == id)
+            .map(|(_, pos)| pos)
+            .or_else(|| {
+                tile.floating_pos
+                    .map(|pos| self.floating.scale_by_working_area(pos))
+            })
+            .unwrap_or_else(|| {
+                self.working_area.loc + (self.working_area.size - size).to_point().downscale(2.)
+            });
+        let center = self
+            .floating
+            .logical_to_size_frac(pos + size.to_point().downscale(2.));
+        Some(Point::from((
+            if center.x.is_finite() { center.x } else { 0.5 },
+            if center.y.is_finite() { center.y } else { 0.5 },
+        )))
+    }
+
+    pub(super) fn prepare_minimized_tile(
+        &self,
+        tile: &mut Tile<W>,
+        center: Option<Point<f64, SizeFrac>>,
+    ) {
+        tile.update_config(
+            self.view_size,
+            self.scale.fractional_scale(),
+            self.options.clone(),
+        );
+        let Some(center) = center else {
+            return;
+        };
+        let size = tile.floating_window_size.unwrap_or_else(|| {
+            tile.window()
+                .expected_size()
+                .unwrap_or_else(|| tile.window().size())
+        });
+        let min = tile.window().min_size();
+        let max = tile.window().max_size();
+        let bounds = self
+            .floating
+            .new_window_toplevel_bounds(tile.window().rules());
+        let size = Size::from((
+            ensure_min_max_size(size.w.max(1).min(bounds.w.max(1)), min.w, max.w),
+            ensure_min_max_size(size.h.max(1).min(bounds.h.max(1)), min.h, max.h),
+        ));
+        tile.floating_window_size = Some(size);
+        let tile_size = Size::from((
+            tile.tile_width_for_window_width(f64::from(size.w)),
+            tile.tile_height_for_window_height(f64::from(size.h)),
+        ));
+        let pos = self.floating.scale_by_working_area(center) - tile_size.to_point().downscale(2.);
+        let pos = self.floating.clamp_within_working_area(pos, tile_size);
+        tile.floating_pos = Some(self.floating.logical_to_size_frac(pos));
     }
 
     pub fn remove_tile(&mut self, id: &W::Id, transaction: Transaction) -> RemovedTile<W> {

@@ -534,29 +534,51 @@ impl ForeignToplevelHandler for State {
     }
 
     fn activate(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
-            let window = mapped.window.clone();
-            self.niri.layout.activate_window(&window);
-            self.niri.layer_shell_on_demand_focus = None;
-            self.niri.queue_redraw_all();
+        if self.niri.is_locked() {
+            return;
+        }
+        if let Some((mapped, _)) = self.niri.layout.find_managed_window_and_output(&wl_surface) {
+            if mapped.is_minimized() {
+                self.restore_window(Some(mapped.id()), None, true);
+            } else {
+                let window = mapped.window.clone();
+                self.niri.layout.activate_window(&window);
+                self.niri.layer_shell_on_demand_focus = None;
+                self.niri.queue_redraw_all();
+            }
+        }
+    }
+
+    fn set_minimized(&mut self, wl_surface: WlSurface) {
+        if let Some((mapped, _)) = self.niri.layout.find_managed_window_and_output(&wl_surface) {
+            self.minimize_window(Some(mapped.id()));
+        }
+    }
+
+    fn unset_minimized(&mut self, wl_surface: WlSurface) {
+        if let Some((mapped, _)) = self.niri.layout.find_managed_window_and_output(&wl_surface) {
+            // Unminimizing does not imply activating the window.
+            self.restore_window(Some(mapped.id()), None, false);
         }
     }
 
     fn close(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+        if let Some((mapped, _)) = self.niri.layout.find_managed_window_and_output(&wl_surface) {
             mapped.toplevel().send_close();
         }
     }
 
     fn set_fullscreen(&mut self, wl_surface: WlSurface, wl_output: Option<WlOutput>) {
-        if let Some((mapped, current_output)) = self.niri.layout.find_window_and_output(&wl_surface)
+        if let Some((mapped, current_output)) =
+            self.niri.layout.find_managed_window_and_output(&wl_surface)
         {
             let window = mapped.window.clone();
+            let is_minimized = mapped.is_minimized();
 
             if let Some(requested_output) =
                 wl_output.and_then(|o| self.niri.output_from_resource(&o))
             {
-                if Some(&requested_output) != current_output {
+                if !is_minimized && Some(&requested_output) != current_output {
                     self.niri.layout.move_to_output(
                         Some(&window),
                         &requested_output,
@@ -571,21 +593,21 @@ impl ForeignToplevelHandler for State {
     }
 
     fn unset_fullscreen(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+        if let Some((mapped, _)) = self.niri.layout.find_managed_window_and_output(&wl_surface) {
             let window = mapped.window.clone();
             self.niri.layout.set_fullscreen(&window, false);
         }
     }
 
     fn set_maximized(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+        if let Some((mapped, _)) = self.niri.layout.find_managed_window_and_output(&wl_surface) {
             let window = mapped.window.clone();
             self.niri.layout.set_maximized(&window, true);
         }
     }
 
     fn unset_maximized(&mut self, wl_surface: WlSurface) {
-        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+        if let Some((mapped, _)) = self.niri.layout.find_managed_window_and_output(&wl_surface) {
             let window = mapped.window.clone();
             self.niri.layout.set_maximized(&window, false);
         }
@@ -810,30 +832,36 @@ impl XdgActivationHandler for State {
         surface: WlSurface,
     ) {
         if token_data.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT {
-            if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(&surface) {
-                let window = mapped.window.clone();
-                match mapped.rules().on_xdg_activate {
-                    Some(niri_config::OnXdgActivate::Ignore) => {}
+            if let Some((mapped, _)) = self
+                .niri
+                .layout
+                .find_managed_window_and_output_mut(&surface)
+            {
+                let should_focus = match mapped.rules().on_xdg_activate {
+                    Some(niri_config::OnXdgActivate::Ignore) => false,
                     Some(niri_config::OnXdgActivate::SetUrgent) => {
                         mapped.set_urgent(true);
-                        self.niri.queue_redraw_all();
+                        false
                     }
-                    Some(niri_config::OnXdgActivate::Focus) => {
+                    Some(niri_config::OnXdgActivate::Focus) => true,
+                    None if token_data.user_data.get::<UrgentOnlyMarker>().is_some() => {
+                        mapped.set_urgent(true);
+                        false
+                    }
+                    None => true,
+                };
+                let window = mapped.window.clone();
+                let id = mapped.id();
+                let is_minimized = mapped.is_minimized();
+                if should_focus && !self.niri.is_locked() {
+                    if is_minimized {
+                        self.restore_window(Some(id), None, true);
+                    } else {
                         self.niri.layout.activate_window(&window);
                         self.niri.layer_shell_on_demand_focus = None;
-                        self.niri.queue_redraw_all();
-                    }
-                    None => {
-                        if token_data.user_data.get::<UrgentOnlyMarker>().is_some() {
-                            mapped.set_urgent(true);
-                            self.niri.queue_redraw_all();
-                        } else {
-                            self.niri.layout.activate_window(&window);
-                            self.niri.layer_shell_on_demand_focus = None;
-                            self.niri.queue_redraw_all();
-                        }
                     }
                 }
+                self.niri.queue_redraw_all();
             } else if let Some(unmapped) = self.niri.unmapped_windows.get_mut(&surface) {
                 unmapped.activation_token_data = Some(token_data);
             }

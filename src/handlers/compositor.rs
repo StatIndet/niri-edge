@@ -84,11 +84,21 @@ impl CompositorHandler for State {
                         window,
                         state,
                         activation_token_data,
+                        wants_minimized,
                     } = entry.remove();
 
                     window.on_commit();
 
                     let toplevel = window.toplevel().expect("no X11 support");
+                    // A dialog created by a hidden parent must not appear on its own or steal
+                    // focus. It remains independently restorable through the normal window ID.
+                    let wants_minimized = wants_minimized
+                        || toplevel.parent().is_some_and(|parent| {
+                            self.niri
+                                .layout
+                                .find_managed_window_and_output(&parent)
+                                .is_some_and(|(parent, _)| parent.is_minimized())
+                        });
 
                     let (
                         rules,
@@ -199,6 +209,7 @@ impl CompositorHandler for State {
                         Mapped::new(window, rules, hook, &config)
                     };
                     let window = mapped.window.clone();
+                    let id = mapped.id();
 
                     let target = if let Some(p) = &parent {
                         // Open dialogs next to their parent window.
@@ -217,7 +228,11 @@ impl CompositorHandler for State {
                         height,
                         is_full_width,
                         is_floating,
-                        activate,
+                        if wants_minimized {
+                            ActivateWindow::No
+                        } else {
+                            activate
+                        },
                     );
                     let output = output.cloned();
 
@@ -231,6 +246,11 @@ impl CompositorHandler for State {
                         }
                     } else {
                         error!("layout is missing the window that we just added");
+                    }
+
+                    if wants_minimized {
+                        self.minimize_window(Some(id));
+                        return;
                     }
 
                     if let Some(output) = output {
@@ -259,18 +279,20 @@ impl CompositorHandler for State {
             }
 
             // This is a commit of a previously-mapped root or a non-toplevel root.
-            if let Some((mapped, output)) = self.niri.layout.find_window_and_output(surface) {
+            if let Some((mapped, output)) = self.niri.layout.find_managed_window_and_output(surface)
+            {
                 let window = mapped.window.clone();
                 let output = output.cloned();
 
                 let id = mapped.id();
+                let is_minimized = mapped.is_minimized();
 
                 // This is a commit of a previously-mapped toplevel.
                 let is_mapped = is_mapped(surface);
 
                 // Must start the close animation before window.on_commit().
                 let transaction = Transaction::new();
-                if !is_mapped {
+                if !is_mapped && !is_minimized {
                     let blocker = transaction.blocker();
                     self.backend.with_primary_renderer(|renderer| {
                         self.niri
@@ -341,11 +363,13 @@ impl CompositorHandler for State {
                 }
 
                 // The toplevel remains mapped.
-                self.niri.window_mru_ui.update_window(&self.niri.layout, id);
+                if !is_minimized {
+                    self.niri.window_mru_ui.update_window(&self.niri.layout, id);
+                }
                 self.niri.layout.update_window(&window, serial);
 
                 // Move the toplevel according to the attach offset.
-                if let Some(delta) = buffer_delta {
+                if let Some(delta) = buffer_delta.filter(|_| !is_minimized) {
                     if delta.x != 0 || delta.y != 0 {
                         let (x, y) = delta.to_f64().into();
                         self.niri.layout.move_floating_window(
@@ -358,7 +382,9 @@ impl CompositorHandler for State {
                 }
 
                 // Popup placement depends on window size which might have changed.
-                self.update_reactive_popups(&window);
+                if !is_minimized {
+                    self.update_reactive_popups(&window);
+                }
 
                 if let Some(output) = output {
                     self.niri.queue_redraw(&output);
@@ -374,14 +400,19 @@ impl CompositorHandler for State {
         }
 
         // This is a commit of a non-root or a non-toplevel root.
-        let root_window_output = self.niri.layout.find_window_and_output(&root_surface);
+        let root_window_output = self
+            .niri
+            .layout
+            .find_managed_window_and_output(&root_surface);
         if let Some((mapped, output)) = root_window_output {
             let window = mapped.window.clone();
             let output = output.cloned();
             window.on_commit();
-            self.niri
-                .window_mru_ui
-                .update_window(&self.niri.layout, mapped.id());
+            if !mapped.is_minimized() {
+                self.niri
+                    .window_mru_ui
+                    .update_window(&self.niri.layout, mapped.id());
+            }
             self.niri.layout.update_window(&window, None);
             if let Some(output) = output {
                 self.niri.queue_redraw(&output);

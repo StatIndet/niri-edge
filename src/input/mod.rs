@@ -850,10 +850,59 @@ impl State {
                 }
             }
             Action::CloseWindowById(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .managed_windows()
+                    .find(|(_, m)| m.id().get() == id);
                 if let Some((_, mapped)) = window {
                     mapped.toplevel().send_close();
                 }
+            }
+            Action::MinimizeWindow(id) => {
+                let id = match id {
+                    Some(id) => {
+                        let Some(id) = self
+                            .niri
+                            .layout
+                            .managed_windows()
+                            .find(|(_, mapped)| mapped.id().get() == id)
+                            .map(|(_, mapped)| mapped.id())
+                        else {
+                            return;
+                        };
+                        Some(id)
+                    }
+                    None => None,
+                };
+                self.minimize_window(id);
+            }
+            Action::RestoreWindow(id, output) => {
+                let id = match id {
+                    Some(id) => {
+                        let Some(id) = self
+                            .niri
+                            .layout
+                            .managed_windows()
+                            .find(|(_, mapped)| mapped.id().get() == id)
+                            .map(|(_, mapped)| mapped.id())
+                        else {
+                            return;
+                        };
+                        Some(id)
+                    }
+                    None => None,
+                };
+                let output = match output {
+                    Some(name) => {
+                        let Some(output) = self.niri.output_by_name_match(&name).cloned() else {
+                            return;
+                        };
+                        Some(output)
+                    }
+                    None => None,
+                };
+                self.restore_window(id, output.as_ref(), true);
             }
             Action::FullscreenWindow => {
                 let focus = self.niri.layout.focus().map(|m| m.window.clone());
@@ -890,7 +939,11 @@ impl State {
                 }
             }
             Action::FocusWindow(id) => {
-                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = self
+                    .niri
+                    .layout
+                    .managed_windows()
+                    .find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.focus_window(&window);

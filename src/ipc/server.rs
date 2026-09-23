@@ -31,7 +31,7 @@ use smithay::utils::SERIAL_COUNTER;
 use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer};
 
 use crate::backend::IpcOutputMap;
-use crate::handlers::image_copy_capture::{source_output, source_window};
+use crate::handlers::image_copy_capture::{source_managed_window, source_output};
 use crate::input::pick_window_grab::PickWindowGrab;
 use crate::layout::workspace::WorkspaceId;
 use crate::niri::State;
@@ -273,6 +273,9 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
     let response = match request {
         Request::ReturnError => return Err(String::from("example compositor error")),
         Request::Version => Response::Version(version()),
+        Request::Capabilities => Response::Capabilities(niri_ipc::Capabilities {
+            window_minimization: true,
+        }),
         Request::Outputs => {
             let ipc_outputs = ctx.ipc_outputs.lock().unwrap().clone();
             let outputs = ipc_outputs.values().cloned().map(|o| (o.name.clone(), o));
@@ -524,8 +527,9 @@ fn make_ipc_window(
         app_id: role.app_id.clone(),
         pid: mapped.credentials().map(|c| c.pid),
         workspace_id: workspace_id.map(|id| id.get()),
-        is_focused: mapped.is_focused(),
+        is_focused: mapped.is_focused() && !mapped.is_minimized(),
         is_floating: mapped.is_floating(),
+        is_minimized: mapped.is_minimized(),
         is_urgent: mapped.is_urgent(),
         layout,
         focus_timestamp: mapped.get_focus_timestamp().map(Timestamp::from),
@@ -704,11 +708,11 @@ impl State {
         // Check for window changes.
         let mut seen = HashSet::new();
         let mut focused_id = None;
-        layout.with_windows(|mapped, _, ws_id, window_layout| {
+        layout.with_managed_windows(|mapped, _, ws_id, window_layout| {
             let id = mapped.id().get();
             seen.insert(id);
 
-            if mapped.is_focused() {
+            if mapped.is_focused() && !mapped.is_minimized() {
                 focused_id = Some(id);
             }
 
@@ -719,8 +723,9 @@ impl State {
             };
 
             let workspace_id = ws_id.map(|id| id.get());
-            let mut changed =
-                ipc_win.workspace_id != workspace_id || ipc_win.is_floating != mapped.is_floating();
+            let mut changed = ipc_win.workspace_id != workspace_id
+                || ipc_win.is_floating != mapped.is_floating()
+                || ipc_win.is_minimized != mapped.is_minimized();
 
             changed |= with_toplevel_role(mapped.toplevel(), |role| {
                 ipc_win.title != role.title || ipc_win.app_id != role.app_id
@@ -736,7 +741,7 @@ impl State {
                 batch_change_layouts.push((id, window_layout));
             }
 
-            if mapped.is_focused() && !ipc_win.is_focused {
+            if mapped.is_focused() && !mapped.is_minimized() && !ipc_win.is_focused {
                 events.push(Event::WindowFocusChanged { id: Some(id) });
             }
 
@@ -923,14 +928,21 @@ impl State {
             .iter()
             .map(|s| (s.session_id, s.stream_id, s.session.source(), s.credentials));
         for (session_id, stream_id, source, credentials) in output_sessions.chain(cursor_sessions) {
-            let target = if let Some(output) = source_output(&source) {
-                niri_ipc::CastTarget::Output {
-                    name: output.name(),
-                }
-            } else if let Some((mapped, _)) = source_window(&self.niri, &source) {
-                niri_ipc::CastTarget::Window {
-                    id: mapped.id().get(),
-                }
+            let (target, is_active) = if let Some(output) = source_output(&source) {
+                (
+                    niri_ipc::CastTarget::Output {
+                        name: output.name(),
+                    },
+                    true,
+                )
+            } else if let Some(mapped) = source_managed_window(&self.niri, &source) {
+                // A hidden window pauses frames, not the capture session or its identity.
+                (
+                    niri_ipc::CastTarget::Window {
+                        id: mapped.id().get(),
+                    },
+                    !mapped.is_minimized(),
+                )
             } else {
                 continue;
             };
@@ -938,14 +950,18 @@ impl State {
             let stream_id = stream_id.get();
             seen.insert(stream_id);
 
-            if !state.casts.contains_key(&stream_id) {
+            if state
+                .casts
+                .get(&stream_id)
+                .is_none_or(|cast| cast.is_active != is_active)
+            {
                 let cast = niri_ipc::Cast {
                     session_id: session_id.get(),
                     stream_id,
                     kind: niri_ipc::CastKind::ExtImageCopyCapture,
                     target,
                     is_dynamic_target: false,
-                    is_active: true,
+                    is_active,
                     pid: credentials.map(|creds| creds.pid),
                     pw_node_id: None,
                 };
