@@ -57,7 +57,8 @@ float funnel_pull(float distance) {
 void main() {
     vec4 w = axis_rect(window_rect);
     vec4 t = axis_rect(target_rect);
-    vec2 point = to_axis(area_origin + niri_v_coords * niri_size);
+    // niri_size is the physical render quad; all animation rectangles are logical.
+    vec2 point = to_axis(area_origin + niri_v_coords * (niri_size / niri_scale));
 
     float lead = smoothstep(0.0, 0.55, morph);
     // Form the neck before drawing the trailing edge away from the window.

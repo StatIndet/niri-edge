@@ -1172,3 +1172,77 @@ fn egl_genie_first_frame_preserves_texture_padding_when_overlapping_dock() {
         );
     }
 }
+
+#[test]
+fn egl_genie_scaled_output_keeps_snapshot_in_logical_coordinates() {
+    for scale in [1., 1.25, 1.5, 2.] {
+        let mut f = setup_with_effect(
+            &format!(
+                "window-rule {{ open-floating true; }}\noutput \"headless-1\" {{ scale {scale}; }}"
+            ),
+            "genie",
+        );
+        let client = f.add_client();
+        let (_, id) = window(&mut f, client, [u32::MAX, 0, 0]);
+        f.niri_complete_animations();
+        set_time(f.niri(), Duration::ZERO);
+        let output = f.niri_output(1);
+        let bounds = |frame: Vec<u8>| {
+            let width = output_size(&output)
+                .to_physical_precise_round::<f64, i32>(scale)
+                .w as usize;
+            let mut bounds = (usize::MAX, usize::MAX, 0, 0);
+            let mut count = 0;
+            for (i, p) in frame.chunks_exact(4).enumerate() {
+                if is_red(p) {
+                    bounds.0 = bounds.0.min(i % width);
+                    bounds.1 = bounds.1.min(i / width);
+                    bounds.2 = bounds.2.max(i % width);
+                    bounds.3 = bounds.3.max(i / width);
+                    count += 1;
+                }
+            }
+            assert!(count > 0);
+            bounds
+        };
+        let size = output_size(&output);
+        let dock = Rectangle::new((size.w - 70., size.h - 55.).into(), (40., 40.).into());
+        let owner = Rc::new(());
+        let win = f.niri().find_window_by_id(id).unwrap();
+        f.niri().layout.set_window_animation_targets(
+            &owner,
+            vec![AnimationTarget {
+                id: win,
+                output: output.clone(),
+                rect: dock,
+                edge: DockEdge::Bottom,
+                layer: None,
+            }],
+        );
+        let before = bounds(pixels(&mut f, &output, RenderTarget::Output));
+        assert!(f.niri_state().minimize_window(Some(id)));
+        let snapshot = bounds(pixels(&mut f, &output, RenderTarget::Output));
+        for (a, b) in [before.0, before.1, before.2, before.3]
+            .into_iter()
+            .zip([snapshot.0, snapshot.1, snapshot.2, snapshot.3])
+        {
+            assert!(
+                a.abs_diff(b) <= 1,
+                "scale {scale}: {before:?} != {snapshot:?}"
+            );
+        }
+        set_time(f.niri(), Duration::from_millis(940));
+        f.niri().advance_animations();
+        let end = bounds(pixels(&mut f, &output, RenderTarget::Output));
+        let x = (end.0 + end.2) as f64 / (2. * scale);
+        let y = (end.1 + end.3) as f64 / (2. * scale);
+        assert!(
+            (x - dock.loc.x - 20.).abs() < 5.,
+            "scale {scale}: landing x {x}"
+        );
+        assert!(
+            (y - dock.loc.y - 20.).abs() < 30.,
+            "scale {scale}: landing y {y}"
+        );
+    }
+}
