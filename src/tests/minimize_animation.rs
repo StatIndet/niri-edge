@@ -124,12 +124,7 @@ fn is_red(p: &[u8]) -> bool {
 
 fn stamp(f: &mut Fixture, client: ClientId, parent: &WlSurface, x: i32, y: i32, color: [u32; 3]) {
     let c = f.client(client);
-    let surface = c
-        .state
-        .compositor
-        .as_ref()
-        .unwrap()
-        .create_surface(&c.qh, ());
+    let surface = c.state.create_surface();
     let sub = c
         .state
         .subcompositor

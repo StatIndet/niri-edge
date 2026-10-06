@@ -114,7 +114,7 @@ fn foreign_toplevel_unminimize_does_not_activate_and_activate_restores() {
     assert_eq!(f.niri().layout.focus().unwrap().id(), second_id);
     handle.set_minimized();
     f.double_roundtrip(client);
-    let seat = f.client(client).state.seat.clone().unwrap();
+    let seat = f.client(client).state.seats.keys().next().unwrap().clone();
     handle.activate(&seat);
     f.double_roundtrip(client);
     assert!(!f.niri().layout.is_minimized(&first));
@@ -240,7 +240,7 @@ fn locked_session_rejects_restore_and_activation() {
     let c = f.client(client);
     c.state.foreign_toplevels[0]
         .handle
-        .activate(c.state.seat.as_ref().unwrap());
+        .activate(c.state.seats.keys().next().unwrap());
     f.double_roundtrip(client);
     assert!(f.niri().layout.is_minimized(&window));
     assert!(f.niri().layout.focus().is_none());
@@ -323,12 +323,7 @@ fn hidden_new_subsurface_commits_update_the_live_window() {
     let window = f.niri().find_window_by_id(id).unwrap();
     let initial_bbox = window.bbox();
     let c = f.client(client);
-    let child = c
-        .state
-        .compositor
-        .as_ref()
-        .unwrap()
-        .create_surface(&c.qh, ());
+    let child = c.state.create_surface();
     let subsurface =
         c.state
             .subcompositor

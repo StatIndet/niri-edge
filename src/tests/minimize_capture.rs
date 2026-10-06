@@ -458,7 +458,7 @@ fn cursor_capture_sessions_survive_minimization() {
                 &c.qh,
                 (),
             );
-            let pointer = c.state.seat.as_ref().unwrap().get_pointer(&c.qh, ());
+            let pointer = c.state.seats.keys().next().unwrap().get_pointer(&c.qh, ());
             let cursor_session = globals
                 .copy_manager
                 .as_ref()
